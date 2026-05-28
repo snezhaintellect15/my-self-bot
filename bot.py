@@ -5,7 +5,6 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from database import (init_db, add_agreement, get_agreements, get_agreement_by_id,
                       mark_done, delete_agreement, update_agreement,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders)
@@ -121,7 +120,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔕 Ежедневное напоминание отключено.")
         return
 
-    # Простейшая проверка формата ЧЧ:ММ
     try:
         datetime.strptime(arg, "%H:%M")
     except ValueError:
@@ -131,8 +129,8 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Ежедневное напоминание установлено на {arg}. Я проверю твои обещания в это время!")
 
-# Функция, которую будет вызывать планировщик каждую минуту
 async def check_reminders(app: Application):
+    """Проверяет всех пользователей с напоминаниями и отправляет уведомления"""
     now = datetime.now().strftime("%H:%M")
     users = get_users_with_reminders()
     for user_id, remind_time in users:
@@ -150,6 +148,10 @@ async def check_reminders(app: Application):
                     await app.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
                 except Exception as e:
                     logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+
+async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+    """Обёртка для JobQueue"""
+    await check_reminders(context.application)
 
 # ---------- Обработчик кнопок ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,10 +254,12 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Планировщик напоминаний
-    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(lambda: check_reminders(application), "cron", minute="*")
-    scheduler.start()
+    # Запускаем проверку напоминаний каждую минуту
+    application.job_queue.run_repeating(
+        check_reminders_job,
+        interval=60,
+        first=10
+    )
 
     keep_alive()
     application.run_polling(allowed_updates=Update.ALL_TYPES)
