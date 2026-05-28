@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -13,6 +13,9 @@ from database import (init_db, add_agreement, get_agreements, get_agreement_by_i
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+# Часовой пояс Москвы (UTC+3)
+MSK_OFFSET = timedelta(hours=3)
 
 # ---------- Flask-сервер ----------
 app = Flask(__name__)
@@ -131,7 +134,8 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_reminders(app: Application):
     """Проверяет всех пользователей с напоминаниями и отправляет уведомления"""
-    now = datetime.now().strftime("%H:%M")
+    # Получаем текущее московское время
+    now = (datetime.utcnow() + MSK_OFFSET).strftime("%H:%M")
     users = get_users_with_reminders()
     for user_id, remind_time in users:
         if remind_time == now:
