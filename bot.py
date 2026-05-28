@@ -1,7 +1,8 @@
 import logging
 import os
+import asyncio
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -25,6 +26,10 @@ def home():
 @app.route('/check_reminders')
 def check_reminders_route():
     """Вызывается cron-job'ом каждую минуту, чтобы проверить напоминания"""
+    asyncio.run(async_check_reminders())
+    return "OK"
+
+async def async_check_reminders():
     now = (datetime.utcnow() + MSK_OFFSET).strftime("%H:%M")
     users = get_users_with_reminders()
     for user_id, remind_time in users:
@@ -38,12 +43,10 @@ def check_reminders_route():
                 for _, text in undone:
                     message += f"⬜ {text}\n"
                 message += "\nНе забудь их выполнить! /list"
-                # Отправляем сообщение через объект application (мы сохраним его при старте)
                 try:
-                    _app.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+                    await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
                 except Exception as e:
                     logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
-    return "OK"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -240,7 +243,7 @@ def main():
         raise ValueError("BOT_TOKEN не задан")
 
     application = Application.builder().token(BOT_TOKEN).build()
-    _app = application  # сохраняем, чтобы использовать в веб-хуке
+    _app = application
     init_db()
 
     application.add_handler(CommandHandler("start", start))
