@@ -32,6 +32,15 @@ def get_agreements(user_id: int):
     conn.close()
     return agreements
 
+def get_agreement_by_id(agreement_id: int):
+    """Возвращает одно обещание по ID или None, если не найдено"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, text, is_done, user_id FROM agreements WHERE id = ?", (agreement_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row  # (id, text, is_done, user_id) или None
+
 def mark_done(agreement_id: int):
     """Отмечает обещание выполненным"""
     conn = sqlite3.connect(DB_NAME)
