@@ -27,7 +27,23 @@ def add_agreement(user_id: int, text: str):
 def get_agreements(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, text, is_done FROM agreements WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT id, text, is_done FROM agreements WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
     agreements = cursor.fetchall()
     conn.close()
     return agreements
+
+def mark_done(agreement_id: int):
+    """Отмечает обещание выполненным"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE agreements SET is_done = 1 WHERE id = ?", (agreement_id,))
+    conn.commit()
+    conn.close()
+
+def delete_agreement(agreement_id: int):
+    """Удаляет обещание по id"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM agreements WHERE id = ?", (agreement_id,))
+    conn.commit()
+    conn.close()
