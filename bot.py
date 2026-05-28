@@ -4,7 +4,7 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from database import init_db, add_agreement, get_agreements, get_agreement_by_id, mark_done, delete_agreement
+from database import init_db, add_agreement, get_agreements, get_agreement_by_id, mark_done, delete_agreement, update_agreement
 
 # Логирование
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -43,7 +43,8 @@ def build_list_message(user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
         if not is_done:
             keyboard.append([
                 InlineKeyboardButton(f"✅ Выполнено ({i})", callback_data=f"done_{agr_id}"),
-                InlineKeyboardButton(f"🗑 Удалить ({i})", callback_data=f"delete_{agr_id}")
+                InlineKeyboardButton(f"🗑 Удалить ({i})", callback_data=f"delete_{agr_id}"),
+                InlineKeyboardButton(f"✏️ Изменить ({i})", callback_data=f"edit_{agr_id}")
             ])
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
@@ -114,13 +115,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     data = query.data
 
-    # Обработка кнопки "Выполнено"
+    # Кнопка "Выполнено"
     if data.startswith("done_"):
         agr_id = int(data.split("_")[1])
         mark_done(agr_id)
         await query.edit_message_text("✅ Обещание отмечено как выполненное!")
 
-    # Обработка кнопки "Удалить" – запрос подтверждения
+    # Кнопка "Удалить" – запрос подтверждения
     elif data.startswith("delete_"):
         agr_id = int(data.split("_")[1])
         agreement = get_agreement_by_id(agr_id)
@@ -139,7 +140,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    # Обработка подтверждения удаления
+    # Кнопка "Изменить" – запрос нового текста
+    elif data.startswith("edit_"):
+        agr_id = int(data.split("_")[1])
+        agreement = get_agreement_by_id(agr_id)
+        if not agreement:
+            await query.edit_message_text("Обещание не найдено.")
+            return
+        # Запоминаем, что пользователь редактирует это обещание
+        context.user_data['editing_agreement_id'] = agr_id
+        await query.edit_message_text(
+            f"Введите новый текст для обещания «{agreement[1]}».\n"
+            "Отправьте следующее сообщение — оно полностью заменит старую формулировку."
+        )
+
+    # Подтверждение удаления
     elif data.startswith("confirm_delete_"):
         agr_id = int(data.split("_")[2])
         agreement = get_agreement_by_id(agr_id)
@@ -152,22 +167,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text("Обещание уже удалено.")
 
-    # Обработка отмены удаления – возвращаем список
+    # Отмена удаления – возврат к списку
     elif data.startswith("cancel_delete_"):
         user_id = query.from_user.id
         text, reply_markup = build_list_message(user_id)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-    # Обработка кнопки "Вернуться к списку"
+    # Кнопка "Вернуться к списку"
     elif data == "show_list":
         user_id = query.from_user.id
         text, reply_markup = build_list_message(user_id)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-# ---------- Обработчик обычных сообщений (кнопки меню и автосохранение) ----------
+# ---------- Обработчик обычных сообщений ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
 
+    # Проверяем, не ожидается ли ввод нового текста для редактирования
+    if 'editing_agreement_id' in context.user_data:
+        agr_id = context.user_data.pop('editing_agreement_id')  # удаляем флаг после использования
+        update_agreement(agr_id, text)
+        await update.message.reply_text(f"✏️ Обещание изменено: \"{text}\"")
+        # Покажем обновлённый список
+        user_id = update.effective_user.id
+        list_text, reply_markup = build_list_message(user_id)
+        await update.message.reply_text(list_text, parse_mode="Markdown", reply_markup=reply_markup)
+        return
+
+    # Обработка кнопок главного меню
     if text == "➕ Новое обещание":
         await update.message.reply_text(
             "Введи команду /add и текст обещания. Например:\n`/add Прочитать 20 страниц`",
@@ -182,7 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif text == "⭐ Премиум":
         await premium_info(update, context)
     else:
-        # Автосохранение любого другого текста как обещания
+        # Автосохранение любого другого текста как нового обещания
         user_id = update.effective_user.id
         add_agreement(user_id, text)
         await update.message.reply_text(f"✅ Обещание сохранено: \"{text}\"\nИспользуй /list для просмотра.")

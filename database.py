@@ -39,7 +39,15 @@ def get_agreement_by_id(agreement_id: int):
     cursor.execute("SELECT id, text, is_done, user_id FROM agreements WHERE id = ?", (agreement_id,))
     row = cursor.fetchone()
     conn.close()
-    return row  # (id, text, is_done, user_id) или None
+    return row
+
+def update_agreement(agreement_id: int, new_text: str):
+    """Изменяет текст обещания"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE agreements SET text = ? WHERE id = ?", (new_text, agreement_id))
+    conn.commit()
+    conn.close()
 
 def mark_done(agreement_id: int):
     """Отмечает обещание выполненным"""
