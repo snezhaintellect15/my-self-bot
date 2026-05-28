@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import time
 from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
@@ -261,6 +262,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     keep_alive()
+    time.sleep(2)  # даём время Flask-серверу запуститься
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
