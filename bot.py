@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 import time
 from datetime import datetime, timedelta
 from flask import Flask
@@ -11,7 +10,7 @@ from database import (init_db, add_agreement, get_agreements, get_agreement_by_i
                       mark_done, delete_agreement, update_agreement,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders)
 
-# Логирование с 24-часовым форматом времени
+# Логирование с 24-часовым форматом
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -21,37 +20,12 @@ logging.basicConfig(
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MSK_OFFSET = timedelta(hours=3)
 
-# ---------- Flask-сервер ----------
+# ---------- Flask-сервер (только для поддержания сервиса живым) ----------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Бот работает!"
-
-@app.route('/check_reminders')
-def check_reminders_route():
-    """Вызывается cron-job'ом каждую минуту, чтобы проверить напоминания"""
-    asyncio.run(async_check_reminders())
-    return "OK"
-
-async def async_check_reminders():
-    now = (datetime.utcnow() + MSK_OFFSET).strftime("%H:%M")
-    users = get_users_with_reminders()
-    for user_id, remind_time in users:
-        if remind_time == now:
-            agreements = get_agreements(user_id)
-            if not agreements:
-                continue
-            undone = [(agr_id, text) for agr_id, text, is_done in agreements if not is_done]
-            if undone:
-                message = "🔔 **Напоминание!** У тебя есть невыполненные обещания:\n\n"
-                for _, text in undone:
-                    message += f"⬜ {text}\n"
-                message += "\nНе забудь их выполнить! /list"
-                try:
-                    await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
-                except Exception as e:
-                    logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -60,7 +34,7 @@ def run_flask():
 def keep_alive():
     t = Thread(target=run_flask)
     t.start()
-# ---------------------------------
+# --------------------------------------------------------------------
 
 # ---------- Вспомогательная функция списка обещаний ----------
 def build_list_message(user_id: int):
@@ -141,9 +115,9 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         current = get_reminder(user_id)
         if current:
-            await update.message.reply_text(f"Сейчас напоминание установлено на {current}. Измените: `/remind 20:00` или отключите: `/remind off`")
+            await update.message.reply_text(f"Сейчас напоминание установлено на {current}. Измени: `/remind 20:00` или отключи: `/remind off`")
         else:
-            await update.message.reply_text("Напоминание не установлено. Укажите время: `/remind 18:00`")
+            await update.message.reply_text("Напоминание не установлено. Укажи время: `/remind 18:00`")
         return
 
     arg = context.args[0].strip().lower()
@@ -155,11 +129,35 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         datetime.strptime(arg, "%H:%M")
     except ValueError:
-        await update.message.reply_text("Неверный формат. Используйте ЧЧ:ММ, например 18:00")
+        await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 18:00")
         return
 
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Ежедневное напоминание установлено на {arg}. Я проверю твои обещания в это время!")
+
+# Функция проверки напоминаний (вызывается JobQueue каждую минуту)
+async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+    now = (datetime.utcnow() + MSK_OFFSET).strftime("%H:%M")
+    users = get_users_with_reminders()
+    for user_id, remind_time in users:
+        if remind_time == now:
+            agreements = get_agreements(user_id)
+            if not agreements:
+                continue
+            undone = [(agr_id, text) for agr_id, text, is_done in agreements if not is_done]
+            if undone:
+                message = "🔔 **Напоминание!** У тебя есть невыполненные обещания:\n\n"
+                for _, text in undone:
+                    message += f"⬜ {text}\n"
+                message += "\nНе забудь их выполнить! /list"
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
 
 # ---------- Обработчик кнопок ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,12 +241,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Сохранено: \"{text}\"")
 
 def main():
-    global _app
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не задан")
 
     application = Application.builder().token(BOT_TOKEN).build()
-    _app = application
     init_db()
 
     application.add_handler(CommandHandler("start", start))
@@ -261,8 +257,15 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # Запускаем проверку напоминаний каждые 60 секунд
+    application.job_queue.run_repeating(
+        check_reminders_job,
+        interval=60,
+        first=10
+    )
+
     keep_alive()
-    time.sleep(2)  # даём время Flask-серверу запуститься
+    time.sleep(2)  # даём Flask-серверу время запуститься
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

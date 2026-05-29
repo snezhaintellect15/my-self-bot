@@ -72,9 +72,8 @@ def delete_agreement(agreement_id: int):
     conn.commit()
     conn.close()
 
-# --- Новые функции для напоминаний ---
+# Функции для напоминаний
 def set_reminder(user_id: int, time_str: str):
-    """Устанавливает или обновляет время напоминания (формат ЧЧ:ММ)"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO reminders (user_id, remind_time) VALUES (?, ?)", (user_id, time_str))
@@ -82,7 +81,6 @@ def set_reminder(user_id: int, time_str: str):
     conn.close()
 
 def delete_reminder(user_id: int):
-    """Удаляет напоминание пользователя"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
@@ -90,7 +88,6 @@ def delete_reminder(user_id: int):
     conn.close()
 
 def get_reminder(user_id: int) -> str | None:
-    """Возвращает время напоминания пользователя или None, если не установлено"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT remind_time FROM reminders WHERE user_id = ?", (user_id,))
@@ -99,7 +96,6 @@ def get_reminder(user_id: int) -> str | None:
     return row[0] if row else None
 
 def get_users_with_reminders() -> list[tuple[int, str]]:
-    """Возвращает список (user_id, remind_time) для всех пользователей с активными напоминаниями"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, remind_time FROM reminders")
