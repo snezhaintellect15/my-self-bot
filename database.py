@@ -39,6 +39,16 @@ def init_db():
         )
     """)
 
+    # Таблица достижений
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS achievements (
+            user_id INTEGER NOT NULL,
+            achievement_key TEXT NOT NULL,
+            awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, achievement_key)
+        )
+    """)
+
     # Попытка добавить колонки, если их ещё нет
     for col in ["category_id", "done_at"]:
         try:
@@ -47,7 +57,7 @@ def init_db():
             elif col == "done_at":
                 cursor.execute("ALTER TABLE agreements ADD COLUMN done_at TIMESTAMP DEFAULT NULL")
         except sqlite3.OperationalError:
-            pass  # колонка уже существует
+            pass
 
     # Таблица напоминаний
     cursor.execute("""
@@ -132,7 +142,7 @@ def get_agreements(user_id: int):
     """, (user_id,))
     agreements = cursor.fetchall()
     conn.close()
-    return agreements  # список кортежей (id, text, is_done, category_name)
+    return agreements
 
 def get_agreement_by_id(agreement_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -152,7 +162,6 @@ def update_agreement(agreement_id: int, new_text: str):
 def mark_done(agreement_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Устанавливаем is_done=1 и фиксируем время выполнения
     cursor.execute("UPDATE agreements SET is_done = 1, done_at = CURRENT_TIMESTAMP WHERE id = ?", (agreement_id,))
     conn.commit()
     conn.close()
@@ -227,9 +236,8 @@ def get_stats(user_id: int) -> dict:
     conn.close()
     return {"total": total, "done": done, "percent": percent, "streak": streak}
 
-# ---------- Экспорт (теперь включает done_at) ----------
+# ---------- Экспорт ----------
 def get_agreements_export(user_id: int):
-    """Возвращает список кортежей (text, category_name, created_at, is_done, done_at)"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -242,3 +250,73 @@ def get_agreements_export(user_id: int):
     data = cursor.fetchall()
     conn.close()
     return data
+
+# ---------- Достижения ----------
+ACHIEVEMENTS = {
+    "novice": ("🏅 Новичок", "Создать 10 обещаний"),
+    "discipline": ("🔥 Дисциплина", "Выполнять обещания 7 дней подряд"),
+    "champion": ("👑 Чемпион", "Выполнить 100 обещаний"),
+}
+
+def get_user_achievements(user_id: int) -> list[str]:
+    """Возвращает список ключей полученных достижений"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT achievement_key FROM achievements WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+def award_achievement(user_id: int, key: str) -> bool:
+    """Выдаёт достижение, если его ещё нет. Возвращает True, если было выдано сейчас."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO achievements (user_id, achievement_key) VALUES (?, ?)", (user_id, key))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+def check_achievements(user_id: int) -> list[str]:
+    """Проверяет условия и выдаёт новые достижения. Возвращает список ключей только что полученных."""
+    newly_awarded = []
+
+    # Считаем общее количество созданных обещаний
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
+    total_created = cursor.fetchone()[0]
+
+    # Считаем количество выполненных обещаний
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
+    total_done = cursor.fetchone()[0]
+
+    # Текущая серия (streak)
+    cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
+    dates = [row[0] for row in cursor.fetchall()]
+    streak = 0
+    if dates:
+        streak_end = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        streak = 1
+        expected = streak_end - timedelta(days=1)
+        for d_str in dates[1:]:
+            d = datetime.strptime(d_str, "%Y-%m-%d").date()
+            if d == expected:
+                streak += 1
+                expected -= timedelta(days=1)
+            else:
+                break
+
+    # Проверяем условия
+    if total_created >= 10 and award_achievement(user_id, "novice"):
+        newly_awarded.append("novice")
+    if streak >= 7 and award_achievement(user_id, "discipline"):
+        newly_awarded.append("discipline")
+    if total_done >= 100 and award_achievement(user_id, "champion"):
+        newly_awarded.append("champion")
+
+    conn.close()
+    return newly_awarded

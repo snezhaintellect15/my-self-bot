@@ -10,7 +10,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       mark_done, delete_agreement, update_agreement,
                       create_category, get_categories, get_category_count,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
-                      get_stats, get_agreements_export)
+                      get_stats, get_agreements_export,
+                      check_achievements, get_user_achievements, ACHIEVEMENTS)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -87,7 +88,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("❓ Помощь")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
-        [KeyboardButton("📤 Экспорт")]
+        [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
@@ -106,7 +107,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/add — быстро добавить обещание без категории\n"
         "/list — показать список\n"
-        "/stats — твоя статистика\n"
+        "/stats — твоя статистика и достижения\n"
+        "/achievements — список достижений\n"
         "/export — экспорт данных (премиум — текстовый файл)\n"
         "/menu — меню\n"
         "/remind ЧЧ:ММ — напоминание\n"
@@ -123,6 +125,11 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
     text = " ".join(context.args)
     add_agreement(user_id, text)
     await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
+    # Проверка достижений после добавления
+    new_achievements = check_achievements(user_id)
+    for key in new_achievements:
+        name, desc = ACHIEVEMENTS[key]
+        await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
 # Список
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,7 +137,7 @@ async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_list_message(user_id)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Статистика
+# Статистика (показывает и достижения)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_stats(user_id)
@@ -144,12 +151,32 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "\n🌟 Идеально! Ты выполнил все обещания!"
     elif stats['streak'] >= 7:
         message += "\n🔥 Отличная серия! Продолжай в том же духе."
+
+    # Достижения
+    achieved = get_user_achievements(user_id)
+    if achieved:
+        message += "\n\n🏆 **Твои достижения:**\n"
+        for key in achieved:
+            name, desc = ACHIEVEMENTS[key]
+            message += f"  {name} — {desc}\n"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт (теперь с done_at)
+# Команда достижений
+async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    achieved = get_user_achievements(user_id)
+    message = "🏆 **Доска достижений**\n\n"
+    for key, (name, desc) in ACHIEVEMENTS.items():
+        status = "✅" if key in achieved else "⬜"
+        message += f"{status} {name}: {desc}\n"
+    if not achieved:
+        message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+# Экспорт
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    data = get_agreements_export(user_id)  # (text, cat, created_at, is_done, done_at)
+    data = get_agreements_export(user_id)
     if not data:
         await update.message.reply_text("Нет данных для экспорта.")
         return
@@ -305,8 +332,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await categories_menu(update, context)
         return
     elif data.startswith("done_"):
-        mark_done(int(data.split("_")[1]))
+        agr_id = int(data.split("_")[1])
+        mark_done(agr_id)
+        user_id = query.from_user.id
+        new_achievements = check_achievements(user_id)
         await query.edit_message_text("✅ Отмечено выполненным!")
+        for key in new_achievements:
+            name, desc = ACHIEVEMENTS[key]
+            await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
     elif data.startswith("delete_"):
         agr_id = int(data.split("_")[1])
         agreement = get_agreement_by_id(agr_id)
@@ -341,7 +374,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений (добавлена кнопка "📤 Экспорт")
+# Обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -386,6 +419,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stats_command(update, context)
     elif text == "📤 Экспорт":
         await export_command(update, context)
+    elif text == "🏆 Достижения":
+        await achievements_command(update, context)
     elif text == "❓ Помощь":
         await help_command(update, context)
     elif text == "⭐ Премиум":
@@ -395,14 +430,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del context.user_data['adding_agreement_no_cat']
             add_agreement(user_id, text)
             await update.message.reply_text(f"✅ Сохранено (без категории): \"{text}\"")
+            new_achievements = check_achievements(user_id)
+            for key in new_achievements:
+                name, desc = ACHIEVEMENTS[key]
+                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
         elif 'selected_category_id' in context.user_data:
             cat_id = context.user_data.pop('selected_category_id')
             add_agreement(user_id, text, category_id=cat_id)
             cat_name = dict(get_categories(user_id)).get(cat_id, "категория")
             await update.message.reply_text(f"✅ Сохранено в «{cat_name}»: \"{text}\"")
+            new_achievements = check_achievements(user_id)
+            for key in new_achievements:
+                name, desc = ACHIEVEMENTS[key]
+                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
         else:
             add_agreement(user_id, text)
             await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
+            new_achievements = check_achievements(user_id)
+            for key in new_achievements:
+                name, desc = ACHIEVEMENTS[key]
+                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
 # Обработчик выбора категории при добавлении обещания
 async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -433,6 +480,7 @@ def main():
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("achievements", achievements_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
