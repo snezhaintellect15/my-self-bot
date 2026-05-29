@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, date, timedelta
 
 DB_NAME = "agreements.db"
 
@@ -6,7 +7,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Таблица пользователей (для премиум-статуса и т.д.)
+    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -79,7 +80,6 @@ def set_premium(user_id: int, status: bool):
 
 # ---------- Категории ----------
 def create_category(user_id: int, name: str) -> bool:
-    """Создаёт категорию. Возвращает True при успехе, False если такая уже есть."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
@@ -116,7 +116,6 @@ def add_agreement(user_id: int, text: str, category_id: int = None):
     conn.close()
 
 def get_agreements(user_id: int):
-    """Возвращает список обещаний с названием категории (или None)"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -189,3 +188,39 @@ def get_users_with_reminders() -> list[tuple[int, str]]:
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+# ---------- Статистика ----------
+def get_stats(user_id: int) -> dict:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # Общее количество
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
+    total = cursor.fetchone()[0]
+
+    # Выполнено
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
+    done = cursor.fetchone()[0]
+
+    percent = round(done / total * 100, 1) if total > 0 else 0.0
+
+    # Streak: получаем все уникальные даты, когда были выполнены обещания, по убыванию
+    cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
+    dates = [row[0] for row in cursor.fetchall()]
+
+    streak = 0
+    if dates:
+        # dates[0] — самая свежая дата выполнения
+        streak_end = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        streak = 1
+        expected = streak_end - timedelta(days=1)
+        for d_str in dates[1:]:
+            d = datetime.strptime(d_str, "%Y-%m-%d").date()
+            if d == expected:
+                streak += 1
+                expected -= timedelta(days=1)
+            else:
+                break
+
+    conn.close()
+    return {"total": total, "done": done, "percent": percent, "streak": streak}

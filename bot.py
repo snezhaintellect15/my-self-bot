@@ -9,7 +9,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       add_agreement, get_agreements, get_agreement_by_id,
                       mark_done, delete_agreement, update_agreement,
                       create_category, get_categories, get_category_count,
-                      set_reminder, delete_reminder, get_reminder, get_users_with_reminders)
+                      set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
+                      get_stats)  # добавлен импорт get_stats
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -85,14 +86,14 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("➕ Новое обещание")],
         [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("❓ Помощь")],
-        [KeyboardButton("⭐ Премиум")]
+        [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 # Старт
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    create_user(user_id)  # убедимся, что пользователь есть в базе
+    create_user(user_id)
     await update.message.reply_text(
         f"Привет! Я бот-трекер «Договорился с собой».\n"
         "С моей помощью ты можешь записывать обещания, распределять их по категориям и получать напоминания.\n"
@@ -104,6 +105,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/add — быстро добавить обещание без категории\n"
         "/list — показать список\n"
+        "/stats — твоя статистика\n"
         "/menu — меню\n"
         "/remind ЧЧ:ММ — напоминание\n"
         "/remind off — отключить напоминание\n"
@@ -125,6 +127,22 @@ async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_list_message(user_id)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+
+# Статистика
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    stats = get_stats(user_id)
+    message = (
+        "📊 **Твоя статистика:**\n\n"
+        f"• Всего обещаний: {stats['total']}\n"
+        f"• Выполнено: {stats['done']} ({stats['percent']}%)\n"
+        f"• Дней подряд с выполненными обещаниями: {stats['streak']}\n"
+    )
+    if stats['total'] > 0 and stats['percent'] == 100:
+        message += "\n🌟 Идеально! Ты выполнил все обещания!"
+    elif stats['streak'] >= 7:
+        message += "\n🔥 Отличная серия! Продолжай в том же духе."
+    await update.message.reply_text(message, parse_mode="Markdown")
 
 # Премиум: инфо и переключение
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -215,7 +233,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Категории
     if data == "cat_create":
-        # Проверка лимита: бесплатно 1, премиум безлимит
         user_id = query.from_user.id
         count = get_category_count(user_id)
         if not is_premium(user_id) and count >= 1:
@@ -234,8 +251,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("catdel_"):
         cid = int(data.split("_")[1])
-        # Удаление категории (безопасно: обещания останутся с category_id=NULL)
-        conn = __import__('database').connect
+        import sqlite3
         from database import DB_NAME
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -247,7 +263,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await categories_menu(update, context)
         return
 
-    # Обещания (оставляем старую логику)
+    # Обещания
     elif data.startswith("done_"):
         mark_done(int(data.split("_")[1]))
         await query.edit_message_text("✅ Отмечено выполненным!")
@@ -310,10 +326,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Кнопки меню
     if text == "➕ Новое обещание":
-        # Показываем выбор категории (или сразу текстовый ввод)
         cats = get_categories(user_id)
         if not cats:
-            # Нет категорий – добавляем без категории
             await update.message.reply_text("Введи текст обещания (оно сохранится без категории):")
             context.user_data['adding_agreement_no_cat'] = True
         else:
@@ -331,6 +345,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
             await update.message.reply_text("Нет напоминания. /remind 18:00")
+    elif text == "📊 Статистика":
+        await stats_command(update, context)
     elif text == "❓ Помощь":
         await help_command(update, context)
     elif text == "⭐ Премиум":
@@ -365,9 +381,6 @@ async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['selected_category_id'] = cid
         cat_name = dict(get_categories(user_id)).get(cid, "")
         await query.edit_message_text(f"Введи текст обещания для категории «{cat_name}»:")
-    else:
-        # На всякий случай
-        pass
 
 def main():
     if not BOT_TOKEN:
@@ -382,6 +395,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
+    application.add_handler(CommandHandler("stats", stats_command))  # новая команда
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
