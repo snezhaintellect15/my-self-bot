@@ -84,11 +84,11 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (с разными иконками)
+# Главное меню (исправлены иконки: список - 📝, сводка - 📋)
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
-        [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
+        [KeyboardButton("📝 Мой список"), KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("📋 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")]
@@ -429,7 +429,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agreement = get_agreement_by_id(agr_id)
         if agreement:
             delete_agreement(agr_id)
-            await query.edit_message_text("🗑 Удалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 К списку", callback_data="show_list")]]))
+            await query.edit_message_text("🗑 Удалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 К списку", callback_data="show_list")]]))
         else:
             await query.edit_message_text("Уже удалено.")
     elif data.startswith("cancel_delete_"):
@@ -441,7 +441,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений
+# Обработчик сообщений (с исправленными иконками)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -471,7 +471,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton(name, callback_data=f"addcat_{cid}")] for cid, name in cats]
             keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
             await update.message.reply_text("Выбери категорию для обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif text == "📋 Мой список":
+    elif text == "📝 Мой список":                # ← исправлено
         t, m = build_list_message(user_id)
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
     elif text == "📂 Категории":
@@ -482,7 +482,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
             await update.message.reply_text("Нет напоминания. /remind 18:00")
-    elif text == "📋 Сводка":
+    elif text == "📋 Сводка":                    # ← исправлено
         await summary_command(update, context)
     elif text == "📊 Статистика":
         await stats_command(update, context)
