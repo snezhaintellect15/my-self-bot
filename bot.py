@@ -84,14 +84,15 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (исправлены иконки: список - 📝, сводка - 📋)
+# Главное меню (теперь с кнопкой "❓ Помощь")
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
         [KeyboardButton("📝 Мой список"), KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("📋 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
-        [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")]
+        [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")],
+        [KeyboardButton("❓ Помощь")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
@@ -471,7 +472,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton(name, callback_data=f"addcat_{cid}")] for cid, name in cats]
             keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
             await update.message.reply_text("Выбери категорию для обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif text == "📝 Мой список":                # ← исправлено
+    elif text == "📝 Мой список":
         t, m = build_list_message(user_id)
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
     elif text == "📂 Категории":
@@ -482,7 +483,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
             await update.message.reply_text("Нет напоминания. /remind 18:00")
-    elif text == "📋 Сводка":                    # ← исправлено
+    elif text == "📋 Сводка":
         await summary_command(update, context)
     elif text == "📊 Статистика":
         await stats_command(update, context)
