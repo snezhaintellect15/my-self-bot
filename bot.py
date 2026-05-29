@@ -1,5 +1,7 @@
 import logging
 import os
+import io
+import csv
 from datetime import datetime, timedelta, UTC
 from flask import Flask
 from threading import Thread
@@ -10,7 +12,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       mark_done, delete_agreement, update_agreement,
                       create_category, get_categories, get_category_count,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
-                      get_stats)
+                      get_stats, get_agreements_export)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -42,7 +44,6 @@ def build_list_message(user_id: int):
     if not agreements:
         return "У тебя пока нет ни одного обещания.", None
 
-    # Группировка
     groups = {}
     no_cat = []
     for agr_id, text, is_done, cat_name in agreements:
@@ -52,9 +53,8 @@ def build_list_message(user_id: int):
             groups.setdefault(cat_name, []).append((agr_id, text, is_done))
 
     response = "📝 **Твои обещания:**\n\n"
-    keyboard = []  # общий список кнопок
+    keyboard = []
 
-    # Сначала без категории
     if no_cat:
         response += "⚪️ *Без категории*\n"
         for i, (agr_id, text, is_done) in enumerate(no_cat, start=1):
@@ -67,7 +67,6 @@ def build_list_message(user_id: int):
                     InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}")
                 ])
 
-    # По категориям
     for cat, items in groups.items():
         response += f"\n📂 *{cat}*\n"
         for i, (agr_id, text, is_done) in enumerate(items, start=1):
@@ -83,13 +82,14 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню
+# Главное меню (добавлена кнопка "📤 Экспорт")
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
         [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("❓ Помощь")],
-        [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")]
+        [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
+        [KeyboardButton("📤 Экспорт")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
@@ -109,6 +109,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/add — быстро добавить обещание без категории\n"
         "/list — показать список\n"
         "/stats — твоя статистика\n"
+        "/export — экспорт данных (премиум — CSV-файл)\n"
         "/menu — меню\n"
         "/remind ЧЧ:ММ — напоминание\n"
         "/remind off — отключить напоминание\n"
@@ -147,7 +148,39 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "\n🔥 Отличная серия! Продолжай в том же духе."
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Премиум: инфо и переключение
+# Экспорт
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    data = get_agreements_export(user_id)
+    if not data:
+        await update.message.reply_text("Нет данных для экспорта.")
+        return
+
+    # Текстовое представление (бесплатно)
+    text = "📤 **Экспорт обещаний**\n\n"
+    for text_line, cat, created, is_done in data:
+        status = "✅" if is_done else "⬜"
+        cat_str = f"[{cat}] " if cat else ""
+        text += f"{status} {cat_str}{text_line} ({created})\n"
+    text += f"\nВсего записей: {len(data)}"
+
+    # Если премиум — отправляем CSV-файл
+    if is_premium(user_id):
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Обещание", "Категория", "Дата создания", "Статус"])
+        for text_line, cat, created, is_done in data:
+            writer.writerow([text_line, cat or "", created, "Выполнено" if is_done else "Не выполнено"])
+        output.seek(0)
+        await update.message.reply_document(
+            document=output.getvalue().encode('utf-8-sig'),
+            filename="agreements_export.csv",
+            caption="📎 Ваш CSV-файл с обещаниями (премиум-доступ)"
+        )
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# Премиум
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
@@ -162,7 +195,8 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Твой статус: {status_text}\n\n"
         f"• Более одной категории (сейчас можно создать только 1)\n"
         f"• Расширенные напоминания\n"
-        f"• Статистика и экспорт\n\n"
+        f"• Статистика и экспорт\n"
+        f"• CSV-экспорт данных\n\n"
         f"Для теста: /premium on / /premium off",
         parse_mode="Markdown"
     )
@@ -208,9 +242,9 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Напоминание установлено на {arg}")
 
-# Проверка напоминаний (JobQueue) — ИСПРАВЛЕННАЯ строка
+# Проверка напоминаний
 async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
-    now = (datetime.now(UTC) + MSK_OFFSET).strftime("%H:%M")  # заменён utcnow() на now(UTC)
+    now = (datetime.now(UTC) + MSK_OFFSET).strftime("%H:%M")
     users = get_users_with_reminders()
     for user_id, remind_time in users:
         if remind_time == now:
@@ -228,13 +262,12 @@ async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
 
-# Обработчик кнопок (включая категории)
+# Обработчик кнопок
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # Категории
     if data == "cat_create":
         user_id = query.from_user.id
         count = get_category_count(user_id)
@@ -265,8 +298,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cat_back":
         await categories_menu(update, context)
         return
-
-    # Обещания
     elif data.startswith("done_"):
         mark_done(int(data.split("_")[1]))
         await query.edit_message_text("✅ Отмечено выполненным!")
@@ -304,12 +335,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений
+# Обработчик сообщений (добавлена кнопка "📤 Экспорт")
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
-    # Если ждём название категории
     if context.user_data.get('awaiting_category_name'):
         del context.user_data['awaiting_category_name']
         if create_category(user_id, text):
@@ -318,7 +348,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Категория с таким именем уже существует.")
         return
 
-    # Если редактируем обещание
     if 'editing_agreement_id' in context.user_data:
         agr_id = context.user_data.pop('editing_agreement_id')
         update_agreement(agr_id, text)
@@ -327,7 +356,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
         return
 
-    # Кнопки меню
     if text == "➕ Новое обещание":
         cats = get_categories(user_id)
         if not cats:
@@ -350,12 +378,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Нет напоминания. /remind 18:00")
     elif text == "📊 Статистика":
         await stats_command(update, context)
+    elif text == "📤 Экспорт":
+        await export_command(update, context)
     elif text == "❓ Помощь":
         await help_command(update, context)
     elif text == "⭐ Премиум":
         await premium_info(update, context)
     else:
-        # Может быть, ожидается текст после выбора категории или обычное автосохранение
         if context.user_data.get('adding_agreement_no_cat'):
             del context.user_data['adding_agreement_no_cat']
             add_agreement(user_id, text)
@@ -366,7 +395,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cat_name = dict(get_categories(user_id)).get(cat_id, "категория")
             await update.message.reply_text(f"✅ Сохранено в «{cat_name}»: \"{text}\"")
         else:
-            # На всякий случай автосохранение без категории
             add_agreement(user_id, text)
             await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
 
@@ -399,6 +427,7 @@ def main():
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("export", export_command))  # новая команда
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))

@@ -194,23 +194,19 @@ def get_stats(user_id: int) -> dict:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Общее количество
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
     total = cursor.fetchone()[0]
 
-    # Выполнено
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
     done = cursor.fetchone()[0]
 
     percent = round(done / total * 100, 1) if total > 0 else 0.0
 
-    # Streak: получаем все уникальные даты, когда были выполнены обещания, по убыванию
     cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
     dates = [row[0] for row in cursor.fetchall()]
 
     streak = 0
     if dates:
-        # dates[0] — самая свежая дата выполнения
         streak_end = datetime.strptime(dates[0], "%Y-%m-%d").date()
         streak = 1
         expected = streak_end - timedelta(days=1)
@@ -224,3 +220,19 @@ def get_stats(user_id: int) -> dict:
 
     conn.close()
     return {"total": total, "done": done, "percent": percent, "streak": streak}
+
+# ---------- Экспорт (новая функция) ----------
+def get_agreements_export(user_id: int):
+    """Возвращает список кортежей (text, category_name, created_at, is_done) для экспорта"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT a.text, c.name, a.created_at, a.is_done
+        FROM agreements a
+        LEFT JOIN categories c ON a.category_id = c.id
+        WHERE a.user_id = ?
+        ORDER BY a.created_at DESC
+    """, (user_id,))
+    data = cursor.fetchall()
+    conn.close()
+    return data
