@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -10,7 +10,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       mark_done, delete_agreement, update_agreement,
                       create_category, get_categories, get_category_count,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
-                      get_stats)  # добавлен импорт get_stats
+                      get_stats)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -23,12 +23,15 @@ MSK_OFFSET = timedelta(hours=3)
 
 # ---------- Flask ----------
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "Бот работает!"
+
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
 def keep_alive():
     Thread(target=run_flask).start()
 # -----------------------
@@ -205,9 +208,9 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Напоминание установлено на {arg}")
 
-# Проверка напоминаний (JobQueue)
+# Проверка напоминаний (JobQueue) — ИСПРАВЛЕННАЯ строка
 async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
-    now = (datetime.utcnow() + MSK_OFFSET).strftime("%H:%M")
+    now = (datetime.now(UTC) + MSK_OFFSET).strftime("%H:%M")  # заменён utcnow() на now(UTC)
     users = get_users_with_reminders()
     for user_id, remind_time in users:
         if remind_time == now:
@@ -395,7 +398,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
-    application.add_handler(CommandHandler("stats", stats_command))  # новая команда
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
