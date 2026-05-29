@@ -221,7 +221,7 @@ def get_stats(user_id: int) -> dict:
     conn.close()
     return {"total": total, "done": done, "percent": percent, "streak": streak}
 
-# ---------- Экспорт (новая функция) ----------
+# ---------- Экспорт ----------
 def get_agreements_export(user_id: int):
     """Возвращает список кортежей (text, category_name, created_at, is_done) для экспорта"""
     conn = sqlite3.connect(DB_NAME)

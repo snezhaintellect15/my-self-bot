@@ -1,7 +1,5 @@
 import logging
 import os
-import io
-import csv
 from datetime import datetime, timedelta, UTC
 from flask import Flask
 from threading import Thread
@@ -56,8 +54,8 @@ def build_list_message(user_id: int):
     keyboard = []
 
     if no_cat:
-        response += "⚪️ *Без категории*\n"
-        for i, (agr_id, text, is_done) in enumerate(no_cat, start=1):
+        response += "⚪️ *Без категории:*\n"
+        for agr_id, text, is_done in no_cat:
             status = "✅" if is_done else "⬜"
             response += f"  {status} {text}\n"
             if not is_done:
@@ -68,8 +66,8 @@ def build_list_message(user_id: int):
                 ])
 
     for cat, items in groups.items():
-        response += f"\n📂 *{cat}*\n"
-        for i, (agr_id, text, is_done) in enumerate(items, start=1):
+        response += f"\n📂 *{cat}:*\n"
+        for agr_id, text, is_done in items:
             status = "✅" if is_done else "⬜"
             response += f"  {status} {text}\n"
             if not is_done:
@@ -82,7 +80,7 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (добавлена кнопка "📤 Экспорт")
+# Главное меню
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
@@ -98,7 +96,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     create_user(user_id)
     await update.message.reply_text(
-        f"Привет! Я бот-трекер «Договорился с собой».\n"
+        "Привет! Я бот-трекер «Договорился с собой».\n"
         "С моей помощью ты можешь записывать обещания, распределять их по категориям и получать напоминания.\n"
         "/menu — главное меню."
     )
@@ -109,7 +107,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/add — быстро добавить обещание без категории\n"
         "/list — показать список\n"
         "/stats — твоя статистика\n"
-        "/export — экспорт данных (премиум — CSV-файл)\n"
+        "/export — экспорт данных (премиум — текстовый файл)\n"
         "/menu — меню\n"
         "/remind ЧЧ:ММ — напоминание\n"
         "/remind off — отключить напоминание\n"
@@ -148,7 +146,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "\n🔥 Отличная серия! Продолжай в том же духе."
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт
+# Экспорт (с московским временем и двоеточиями)
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_agreements_export(user_id)
@@ -156,26 +154,25 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет данных для экспорта.")
         return
 
-    # Текстовое представление (бесплатно)
     text = "📤 **Экспорт обещаний**\n\n"
     for text_line, cat, created, is_done in data:
         status = "✅" if is_done else "⬜"
-        cat_str = f"[{cat}] " if cat else ""
-        text += f"{status} {cat_str}{text_line} ({created})\n"
+        cat_str = f"[{cat}:] " if cat else ""
+
+        # Конвертация UTC -> Москва
+        created_dt = datetime.fromisoformat(created)
+        created_msk = created_dt + MSK_OFFSET
+        created_formatted = created_msk.strftime("%Y-%m-%d %H:%M:%S")
+
+        text += f"{status} {cat_str}{text_line} ({created_formatted})\n"
     text += f"\nВсего записей: {len(data)}"
 
-    # Если премиум — отправляем CSV-файл
     if is_premium(user_id):
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["Обещание", "Категория", "Дата создания", "Статус"])
-        for text_line, cat, created, is_done in data:
-            writer.writerow([text_line, cat or "", created, "Выполнено" if is_done else "Не выполнено"])
-        output.seek(0)
+        file_content = text
         await update.message.reply_document(
-            document=output.getvalue().encode('utf-8-sig'),
-            filename="agreements_export.csv",
-            caption="📎 Ваш CSV-файл с обещаниями (премиум-доступ)"
+            document=file_content.encode('utf-8-sig'),
+            filename="agreements_export.txt",
+            caption="📎 Ваш текстовый файл с обещаниями (премиум-доступ)"
         )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -196,7 +193,7 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Более одной категории (сейчас можно создать только 1)\n"
         f"• Расширенные напоминания\n"
         f"• Статистика и экспорт\n"
-        f"• CSV-экспорт данных\n\n"
+        f"• Текстовый файл с экспортом\n\n"
         f"Для теста: /premium on / /premium off",
         parse_mode="Markdown"
     )
@@ -427,7 +424,7 @@ def main():
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("export", export_command))  # новая команда
+    application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
