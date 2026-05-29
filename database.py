@@ -49,6 +49,22 @@ def init_db():
         )
     """)
 
+    # Таблица напоминаний (о невыполненных обещаниях)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            user_id INTEGER PRIMARY KEY,
+            remind_time TEXT NOT NULL
+        )
+    """)
+
+    # Таблица ежедневной сводки
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS daily_summary (
+            user_id INTEGER PRIMARY KEY,
+            summary_time TEXT NOT NULL
+        )
+    """)
+
     # Попытка добавить колонки, если их ещё нет
     for col in ["category_id", "done_at"]:
         try:
@@ -58,14 +74,6 @@ def init_db():
                 cursor.execute("ALTER TABLE agreements ADD COLUMN done_at TIMESTAMP DEFAULT NULL")
         except sqlite3.OperationalError:
             pass
-
-    # Таблица напоминаний
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            user_id INTEGER PRIMARY KEY,
-            remind_time TEXT NOT NULL
-        )
-    """)
 
     conn.commit()
     conn.close()
@@ -204,6 +212,37 @@ def get_users_with_reminders() -> list[tuple[int, str]]:
     conn.close()
     return rows
 
+# ---------- Ежедневная сводка ----------
+def set_summary_time(user_id: int, time_str: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO daily_summary (user_id, summary_time) VALUES (?, ?)", (user_id, time_str))
+    conn.commit()
+    conn.close()
+
+def delete_summary_time(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM daily_summary WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_summary_time(user_id: int) -> str | None:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT summary_time FROM daily_summary WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_users_with_summary() -> list[tuple[int, str]]:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, summary_time FROM daily_summary")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 # ---------- Статистика ----------
 def get_stats(user_id: int) -> dict:
     conn = sqlite3.connect(DB_NAME)
@@ -259,7 +298,6 @@ ACHIEVEMENTS = {
 }
 
 def get_user_achievements(user_id: int) -> list[str]:
-    """Возвращает список ключей полученных достижений"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT achievement_key FROM achievements WHERE user_id = ?", (user_id,))
@@ -268,7 +306,6 @@ def get_user_achievements(user_id: int) -> list[str]:
     return [row[0] for row in rows]
 
 def award_achievement(user_id: int, key: str) -> bool:
-    """Выдаёт достижение, если его ещё нет. Возвращает True, если было выдано сейчас."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
@@ -281,20 +318,13 @@ def award_achievement(user_id: int, key: str) -> bool:
         return False
 
 def check_achievements(user_id: int) -> list[str]:
-    """Проверяет условия и выдаёт новые достижения. Возвращает список ключей только что полученных."""
     newly_awarded = []
-
-    # Считаем общее количество созданных обещаний
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
     total_created = cursor.fetchone()[0]
-
-    # Считаем количество выполненных обещаний
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
     total_done = cursor.fetchone()[0]
-
-    # Текущая серия (streak)
     cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
     dates = [row[0] for row in cursor.fetchall()]
     streak = 0
@@ -310,7 +340,6 @@ def check_achievements(user_id: int) -> list[str]:
             else:
                 break
 
-    # Проверяем условия
     if total_created >= 10 and award_achievement(user_id, "novice"):
         newly_awarded.append("novice")
     if streak >= 7 and award_achievement(user_id, "discipline"):

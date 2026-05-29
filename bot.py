@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC, date
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -11,7 +11,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       create_category, get_categories, get_category_count,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
                       get_stats, get_agreements_export,
-                      check_achievements, get_user_achievements, ACHIEVEMENTS)
+                      check_achievements, get_user_achievements, ACHIEVEMENTS,
+                      set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -86,7 +87,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
         [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
-        [KeyboardButton("⏰ Напоминания"), KeyboardButton("❓ Помощь")],
+        [KeyboardButton("⏰ Напоминания"), KeyboardButton("📊 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")]
     ]
@@ -110,7 +111,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stats — твоя статистика и достижения\n"
         "/achievements — список достижений\n"
         "/export — экспорт данных (премиум — текстовый файл)\n"
-        "/menu — меню\n"
+        "/summary — сводка за сегодня\n"
+        "/setsummary ЧЧ:ММ — установить время ежедневной сводки\n"
+        "/setsummary off — отключить ежедневную сводку\n"
         "/remind ЧЧ:ММ — напоминание\n"
         "/remind off — отключить напоминание\n"
         "/premium — инфо о премиуме и переключение (on/off)"
@@ -125,7 +128,6 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
     text = " ".join(context.args)
     add_agreement(user_id, text)
     await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
-    # Проверка достижений после добавления
     new_achievements = check_achievements(user_id)
     for key in new_achievements:
         name, desc = ACHIEVEMENTS[key]
@@ -137,7 +139,7 @@ async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_list_message(user_id)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Статистика (показывает и достижения)
+# Статистика
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_stats(user_id)
@@ -152,7 +154,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif stats['streak'] >= 7:
         message += "\n🔥 Отличная серия! Продолжай в том же духе."
 
-    # Достижения
     achieved = get_user_achievements(user_id)
     if achieved:
         message += "\n\n🏆 **Твои достижения:**\n"
@@ -161,7 +162,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"  {name} — {desc}\n"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Команда достижений
+# Достижения
 async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     achieved = get_user_achievements(user_id)
@@ -275,25 +276,93 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Напоминание установлено на {arg}")
 
-# Проверка напоминаний
-async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+# Ежедневная сводка: ручная
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(await build_daily_summary(user_id))
+
+# Ежедневная сводка: настройка времени
+async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        current = get_summary_time(user_id)
+        if current:
+            await update.message.reply_text(f"Сейчас сводка приходит в {current}. /setsummary off — отключить, /setsummary ЧЧ:ММ — изменить.")
+        else:
+            await update.message.reply_text("Время сводки не задано. /setsummary 20:00 — установить.")
+        return
+    arg = context.args[0].strip().lower()
+    if arg == "off":
+        delete_summary_time(user_id)
+        await update.message.reply_text("📵 Ежедневная сводка отключена.")
+        return
+    try:
+        datetime.strptime(arg, "%H:%M")
+    except ValueError:
+        await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 20:00")
+        return
+    set_summary_time(user_id, arg)
+    await update.message.reply_text(f"📊 Ежедневная сводка будет приходить в {arg}.")
+
+# Построение текста сводки
+async def build_daily_summary(user_id: int) -> str:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    today = date.today()
+    # Количество выполненных сегодня
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1 AND DATE(done_at) = ?", (user_id, today.isoformat()))
+    done_today = cursor.fetchone()[0]
+    # Общая статистика
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
+    total = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
+    done_total = cursor.fetchone()[0]
+    percent = round(done_total / total * 100, 1) if total > 0 else 0.0
+    conn.close()
+
+    message = "📊 **Сводка за сегодня**\n\n"
+    if done_today > 0:
+        message += f"✅ Сегодня ты выполнил {done_today} обещаний. Молодец!\n"
+    else:
+        message += "😴 Сегодня пока нет выполненных обещаний. Не забудь отметить сделанное!\n"
+    message += f"\n📈 **Общий прогресс:** {done_total} из {total} ({percent}%)\n"
+    if percent == 100:
+        message += "🌟 Идеально! Все обещания выполнены."
+    elif percent >= 75:
+        message += "🔥 Отличный результат, продолжай в том же духе!"
+    return message
+
+# Планировщик: проверка напоминаний и сводок
+async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     now = (datetime.now(UTC) + MSK_OFFSET).strftime("%H:%M")
-    users = get_users_with_reminders()
-    for user_id, remind_time in users:
+    # Напоминания
+    users_remind = get_users_with_reminders()
+    for user_id, remind_time in users_remind:
         if remind_time == now:
             agreements = get_agreements(user_id)
-            if not agreements:
-                continue
-            undone = [(a[0], a[1]) for a in agreements if not a[2]]
-            if undone:
-                message = "🔔 **Напоминание!** Невыполненные обещания:\n\n"
-                for _, text in undone:
-                    message += f"⬜ {text}\n"
-                message += "\nНе забудь выполнить! /list"
-                try:
-                    await context.application.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
-                except Exception as e:
-                    logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
+            if agreements:
+                undone = [(a[0], a[1]) for a in agreements if not a[2]]
+                if undone:
+                    message = "🔔 **Напоминание!** Невыполненные обещания:\n\n"
+                    for _, text in undone:
+                        message += f"⬜ {text}\n"
+                    message += "\nНе забудь выполнить! /list"
+                    try:
+                        await context.application.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
+    # Сводки
+    users_summary = get_users_with_summary()
+    for user_id, summary_time in users_summary:
+        if summary_time == now:
+            try:
+                await context.application.bot.send_message(
+                    chat_id=user_id,
+                    text=await build_daily_summary(user_id),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logging.error(f"Ошибка отправки сводки {user_id}: {e}")
 
 # Обработчик кнопок
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,6 +484,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
             await update.message.reply_text("Нет напоминания. /remind 18:00")
+    elif text == "📊 Сводка":
+        await summary_command(update, context)
     elif text == "📊 Статистика":
         await stats_command(update, context)
     elif text == "📤 Экспорт":
@@ -484,11 +555,13 @@ def main():
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
+    application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("setsummary", set_summary_command))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    job_queue.run_repeating(check_reminders_job, interval=60, first=10)
+    job_queue.run_repeating(check_scheduled_jobs, interval=60, first=10)
     keep_alive()
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
