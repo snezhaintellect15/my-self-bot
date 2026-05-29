@@ -1,11 +1,10 @@
 import logging
 import os
-import time
 from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, JobQueue
 from database import (init_db, add_agreement, get_agreements, get_agreement_by_id,
                       mark_done, delete_agreement, update_agreement,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders)
@@ -244,7 +243,10 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не задан")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Создаём JobQueue вручную (требуется в новых версиях библиотеки)
+    job_queue = JobQueue()
+    application = Application.builder().token(BOT_TOKEN).job_queue(job_queue).build()
+    
     init_db()
 
     application.add_handler(CommandHandler("start", start))
@@ -258,14 +260,13 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Запускаем проверку напоминаний каждые 60 секунд
-    application.job_queue.run_repeating(
+    job_queue.run_repeating(
         check_reminders_job,
         interval=60,
         first=10
     )
 
     keep_alive()
-    time.sleep(2)  # даём Flask-серверу время запуститься
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
