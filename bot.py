@@ -146,25 +146,34 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "\n🔥 Отличная серия! Продолжай в том же духе."
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт (с московским временем и двоеточиями)
+# Экспорт (теперь с done_at)
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    data = get_agreements_export(user_id)
+    data = get_agreements_export(user_id)  # (text, cat, created_at, is_done, done_at)
     if not data:
         await update.message.reply_text("Нет данных для экспорта.")
         return
 
     text = "📤 **Экспорт обещаний**\n\n"
-    for text_line, cat, created, is_done in data:
+    for text_line, cat, created, is_done, done_at in data:
         status = "✅" if is_done else "⬜"
         cat_str = f"[{cat}:] " if cat else ""
 
-        # Конвертация UTC -> Москва
         created_dt = datetime.fromisoformat(created)
         created_msk = created_dt + MSK_OFFSET
-        created_formatted = created_msk.strftime("%Y-%m-%d %H:%M:%S")
+        created_formatted = created_msk.strftime("%Y-%m-%d %H:%M")
 
-        text += f"{status} {cat_str}{text_line} ({created_formatted})\n"
+        line = f"{status} {cat_str}{text_line} (создано: {created_formatted}"
+
+        if is_done and done_at:
+            done_dt = datetime.fromisoformat(done_at)
+            done_msk = done_dt + MSK_OFFSET
+            done_formatted = done_msk.strftime("%Y-%m-%d %H:%M")
+            line += f", выполнено: {done_formatted}"
+
+        line += ")\n"
+        text += line
+
     text += f"\nВсего записей: {len(data)}"
 
     if is_premium(user_id):

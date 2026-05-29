@@ -34,15 +34,20 @@ def init_db():
             category_id INTEGER DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_done INTEGER DEFAULT 0,
+            done_at TIMESTAMP DEFAULT NULL,
             FOREIGN KEY (category_id) REFERENCES categories (id)
         )
     """)
 
-    # Попытка добавить колонку category_id, если её ещё нет
-    try:
-        cursor.execute("ALTER TABLE agreements ADD COLUMN category_id INTEGER DEFAULT NULL REFERENCES categories(id)")
-    except sqlite3.OperationalError:
-        pass  # колонка уже существует
+    # Попытка добавить колонки, если их ещё нет
+    for col in ["category_id", "done_at"]:
+        try:
+            if col == "category_id":
+                cursor.execute("ALTER TABLE agreements ADD COLUMN category_id INTEGER DEFAULT NULL REFERENCES categories(id)")
+            elif col == "done_at":
+                cursor.execute("ALTER TABLE agreements ADD COLUMN done_at TIMESTAMP DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
 
     # Таблица напоминаний
     cursor.execute("""
@@ -147,7 +152,8 @@ def update_agreement(agreement_id: int, new_text: str):
 def mark_done(agreement_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("UPDATE agreements SET is_done = 1 WHERE id = ?", (agreement_id,))
+    # Устанавливаем is_done=1 и фиксируем время выполнения
+    cursor.execute("UPDATE agreements SET is_done = 1, done_at = CURRENT_TIMESTAMP WHERE id = ?", (agreement_id,))
     conn.commit()
     conn.close()
 
@@ -221,13 +227,13 @@ def get_stats(user_id: int) -> dict:
     conn.close()
     return {"total": total, "done": done, "percent": percent, "streak": streak}
 
-# ---------- Экспорт ----------
+# ---------- Экспорт (теперь включает done_at) ----------
 def get_agreements_export(user_id: int):
-    """Возвращает список кортежей (text, category_name, created_at, is_done) для экспорта"""
+    """Возвращает список кортежей (text, category_name, created_at, is_done, done_at)"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT a.text, c.name, a.created_at, a.is_done
+        SELECT a.text, c.name, a.created_at, a.is_done, a.done_at
         FROM agreements a
         LEFT JOIN categories c ON a.category_id = c.id
         WHERE a.user_id = ?
