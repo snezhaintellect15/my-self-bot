@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta, UTC, date
 from flask import Flask
 from threading import Thread
@@ -12,7 +13,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
                       get_stats, get_agreements_export,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
-                      set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary)
+                      set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
+                      DB_NAME)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -82,12 +84,12 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню
+# Главное меню (с разными иконками)
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
         [KeyboardButton("📋 Мой список"), KeyboardButton("📂 Категории")],
-        [KeyboardButton("⏰ Напоминания"), KeyboardButton("📊 Сводка")],
+        [KeyboardButton("⏰ Напоминания"), KeyboardButton("📋 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")]
     ]
@@ -302,17 +304,15 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 20:00")
         return
     set_summary_time(user_id, arg)
-    await update.message.reply_text(f"📊 Ежедневная сводка будет приходить в {arg}.")
+    await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
-# Построение текста сводки
+# Построение текста сводки (с иконкой 📋)
 async def build_daily_summary(user_id: int) -> str:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     today = date.today()
-    # Количество выполненных сегодня
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1 AND DATE(done_at) = ?", (user_id, today.isoformat()))
     done_today = cursor.fetchone()[0]
-    # Общая статистика
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
     total = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
@@ -320,7 +320,7 @@ async def build_daily_summary(user_id: int) -> str:
     percent = round(done_total / total * 100, 1) if total > 0 else 0.0
     conn.close()
 
-    message = "📊 **Сводка за сегодня**\n\n"
+    message = "📋 **Сводка за сегодня**\n\n"
     if done_today > 0:
         message += f"✅ Сегодня ты выполнил {done_today} обещаний. Молодец!\n"
     else:
@@ -389,8 +389,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("catdel_"):
         cid = int(data.split("_")[1])
-        import sqlite3
-        from database import DB_NAME
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM categories WHERE id = ?", (cid,))
@@ -484,7 +482,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
             await update.message.reply_text("Нет напоминания. /remind 18:00")
-    elif text == "📊 Сводка":
+    elif text == "📋 Сводка":
         await summary_command(update, context)
     elif text == "📊 Статистика":
         await stats_command(update, context)
