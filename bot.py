@@ -1,6 +1,7 @@
 import logging
 import os
-from datetime import datetime, timedelta, UTC, date
+import sqlite3
+from datetime import datetime, timedelta, date
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -13,9 +14,9 @@ from database import (init_db, create_user, is_premium, set_premium,
                       get_stats, get_agreements_export,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
-                      get_connection,
                       count_scheduled_reminders, create_scheduled_reminder,
-                      get_pending_reminders_for_now, delete_scheduled_reminder)
+                      get_pending_reminders_for_now, delete_scheduled_reminder,
+                      DB_NAME)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -269,7 +270,7 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🗑 Удалить категорию", callback_data="cat_delete_menu")])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Ежедневное напоминание (старое)
+# Ежедневное напоминание
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -331,29 +332,24 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("Неверный формат времени. Используй ЧЧ:ММ")
             return
-        # Текст обещания (оставшиеся аргументы)
         if len(args) > 3:
             text = " ".join(args[3:])
         else:
-            # Попросим выбрать из активных (упростим: пусть пользователь сначала введёт текст)
             await update.message.reply_text("Введи текст обещания после команды, либо используй /remindat с кнопкой из списка активных.")
             return
-        # Проверка лимита
         if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
             await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
             return
-        # Создаём обещание (или используем существующее? Пока просто создаём новое, но лучше бы выбирать)
         add_agreement(user_id, text)
         # Получаем id последнего созданного обещания
-        conn = get_connection()
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM agreements WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+        cursor.execute("SELECT id FROM agreements WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
         agr_id = cursor.fetchone()[0]
         conn.close()
-        # Дата напоминания: следующая среда, например. Рассчитываем ближайший нужный день недели.
         today = date.today()
         days_ahead = recurring_day - today.weekday()
-        if days_ahead <= 0:  # сегодня или прошло, берём следующую неделю
+        if days_ahead <= 0:
             days_ahead += 7
         next_date = today + timedelta(days=days_ahead)
         create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
@@ -368,7 +364,6 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_str = args[1]
     try:
         remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
-        # Если дата уже прошла в этом году, берём следующий год
         if remind_date < date.today():
             remind_date = remind_date.replace(year=date.today().year + 1)
     except ValueError:
@@ -386,16 +381,14 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи текст обещания после команды, либо используй кнопку «🔔 Напомнить» в списке активных.")
         return
 
-    # Проверка лимита
     if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
         await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
         return
 
-    # Создаём обещание
     add_agreement(user_id, text)
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM agreements WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+    cursor.execute("SELECT id FROM agreements WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
     agr_id = cursor.fetchone()[0]
     conn.close()
     create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
@@ -405,7 +398,7 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # remindat_123
+    data = query.data
     if data.startswith("remindat_"):
         agr_id = int(data.split("_")[1])
         agreement = get_agreement_by_id(agr_id)
@@ -448,16 +441,15 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     set_summary_time(user_id, arg)
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
-# Построение текста сводки
 async def build_daily_summary(user_id: int) -> str:
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     today = date.today()
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s AND is_done = 1 AND DATE(done_at) = %s", (user_id, today.isoformat()))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1 AND DATE(done_at) = ?", (user_id, today.isoformat()))
     done_today = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
     total = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s AND is_done = 1", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
     done_total = cursor.fetchone()[0]
     percent = round(done_total / total * 100, 1) if total > 0 else 0.0
     conn.close()
@@ -476,12 +468,12 @@ async def build_daily_summary(user_id: int) -> str:
 
 # Планировщик: проверка всех типов напоминаний и сводок
 async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
-    now_utc = datetime.now(UTC)
+    now_utc = datetime.utcnow()
     now_msk = now_utc + MSK_OFFSET
     now_time = now_msk.strftime("%H:%M")
     today_msk = now_msk.date()
 
-    # 1. Ежедневные напоминания (старые)
+    # 1. Ежедневные напоминания
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
         if remind_time == now_time:
@@ -506,7 +498,6 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user_id,
                 text=f"🔔 **Напоминание:** {text}"
             )
-            # Удаляем одноразовые после отправки
             delete_scheduled_reminder(reminder_id)
         except Exception as e:
             logging.error(f"Ошибка отправки запланированного напоминания {reminder_id}: {e}")
@@ -524,7 +515,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Ошибка отправки сводки {user_id}: {e}")
 
-# Обработчик кнопок (добавлена обработка remindat_)
+# Обработчик кнопок
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -553,9 +544,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("catdel_"):
         cid = int(data.split("_")[1])
-        conn = get_connection()
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM categories WHERE id = %s", (cid,))
+        cursor.execute("DELETE FROM categories WHERE id = ?", (cid,))
         conn.commit()
         conn.close()
         await query.edit_message_text("Категория удалена. Обещания без категории.")
@@ -605,19 +596,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id, only_active=True)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений (добавлен приём ввода после кнопки «🔔 Напомнить»)
+# Обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
-    # Проверка, ожидается ли ввод даты/времени для remindat
     if 'pending_remindat_agr_id' in context.user_data:
         agr_id = context.user_data.pop('pending_remindat_agr_id')
         parts = text.split()
         if not parts:
             await update.message.reply_text("Введи дату и время. Пример: 05.06 18:00 или каждую среду 09:00")
             return
-        # Проверка на повторяющееся
         if parts[0].lower() == "каждую":
             days_map = {"пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,"вс":6,"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
             if len(parts) < 3:
@@ -672,7 +661,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔔 Напоминание о «{agreement[1]}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
         return
 
-    # Остальная обработка сообщений (как прежде)
     if context.user_data.get('awaiting_category_name'):
         del context.user_data['awaiting_category_name']
         if create_category(user_id, text):
