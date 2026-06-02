@@ -1,6 +1,5 @@
 import logging
 import os
-import sqlite3
 from datetime import datetime, timedelta, UTC, date
 from flask import Flask
 from threading import Thread
@@ -14,7 +13,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       get_stats, get_agreements_export,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
-                      DB_NAME)
+                      get_connection)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -40,11 +39,12 @@ def keep_alive():
     Thread(target=run_flask).start()
 # -----------------------
 
-# Вспомогательная: построение сгруппированного списка обещаний
-def build_list_message(user_id: int):
-    agreements = get_agreements(user_id)
+# Вспомогательная: построение списка обещаний
+# Теперь принимает флаг only_active (по умолчанию True для /list)
+def build_list_message(user_id: int, only_active: bool = True):
+    agreements = get_agreements(user_id, only_active=only_active)
     if not agreements:
-        return "У тебя пока нет ни одного обещания.", None
+        return ("У тебя пока нет активных обещаний.", None) if only_active else ("Нет выполненных обещаний.", None)
 
     groups = {}
     no_cat = []
@@ -54,13 +54,13 @@ def build_list_message(user_id: int):
         else:
             groups.setdefault(cat_name, []).append((agr_id, text, is_done))
 
-    response = "📝 **Твои обещания:**\n\n"
+    response = "📝 **Активные обещания:**\n\n" if only_active else "📜 **История выполненных:**\n\n"
     keyboard = []
 
     if no_cat:
         response += "⚪️ *Без категории:*\n"
         for agr_id, text, is_done in no_cat:
-            status = "✅" if is_done else "⬜"
+            status = "⬜" if not is_done else "✅"
             response += f"  {status} {text}\n"
             if not is_done:
                 keyboard.append([
@@ -72,7 +72,7 @@ def build_list_message(user_id: int):
     for cat, items in groups.items():
         response += f"\n📂 *{cat}:*\n"
         for agr_id, text, is_done in items:
-            status = "✅" if is_done else "⬜"
+            status = "⬜" if not is_done else "✅"
             response += f"  {status} {text}\n"
             if not is_done:
                 keyboard.append([
@@ -84,11 +84,12 @@ def build_list_message(user_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (теперь с кнопкой "❓ Помощь")
+# Главное меню (добавлена кнопка "📜 История")
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
-        [KeyboardButton("📝 Мой список"), KeyboardButton("📂 Категории")],
+        [KeyboardButton("📝 Активные"), KeyboardButton("📜 История")],
+        [KeyboardButton("📂 Категории")],
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("📋 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")],
@@ -110,7 +111,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/add — быстро добавить обещание без категории\n"
-        "/list — показать список\n"
+        "/list — показать активные обещания\n"
+        "/history — показать выполненные обещания\n"
         "/stats — твоя статистика и достижения\n"
         "/achievements — список достижений\n"
         "/export — экспорт данных (премиум — текстовый файл)\n"
@@ -136,10 +138,16 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
         name, desc = ACHIEVEMENTS[key]
         await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-# Список
+# Список (теперь только активные)
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text, markup = build_list_message(user_id)
+    text, markup = build_list_message(user_id, only_active=True)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+
+# История (выполненные)
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text, markup = build_list_message(user_id, only_active=False)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 # Статистика
@@ -177,7 +185,7 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
         message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт
+# Экспорт (по-прежнему показывает всё)
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_agreements_export(user_id)
@@ -190,14 +198,14 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "✅" if is_done else "⬜"
         cat_str = f"[{cat}:] " if cat else ""
 
-        created_dt = datetime.fromisoformat(created)
+        created_dt = created
         created_msk = created_dt + MSK_OFFSET
         created_formatted = created_msk.strftime("%Y-%m-%d %H:%M")
 
         line = f"{status} {cat_str}{text_line} (создано: {created_formatted}"
 
         if is_done and done_at:
-            done_dt = datetime.fromisoformat(done_at)
+            done_dt = done_at
             done_msk = done_dt + MSK_OFFSET
             done_formatted = done_msk.strftime("%Y-%m-%d %H:%M")
             line += f", выполнено: {done_formatted}"
@@ -307,16 +315,16 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     set_summary_time(user_id, arg)
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
-# Построение текста сводки (с иконкой 📋)
+# Построение текста сводки
 async def build_daily_summary(user_id: int) -> str:
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_connection()
     cursor = conn.cursor()
     today = date.today()
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1 AND DATE(done_at) = ?", (user_id, today.isoformat()))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s AND is_done = 1 AND DATE(done_at) = %s", (user_id, today.isoformat()))
     done_today = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s", (user_id,))
     total = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = %s AND is_done = 1", (user_id,))
     done_total = cursor.fetchone()[0]
     percent = round(done_total / total * 100, 1) if total > 0 else 0.0
     conn.close()
@@ -340,7 +348,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
         if remind_time == now:
-            agreements = get_agreements(user_id)
+            agreements = get_agreements(user_id, only_active=True)  # смотрим только активные
             if agreements:
                 undone = [(a[0], a[1]) for a in agreements if not a[2]]
                 if undone:
@@ -390,9 +398,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("catdel_"):
         cid = int(data.split("_")[1])
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM categories WHERE id = ?", (cid,))
+        cursor.execute("DELETE FROM categories WHERE id = %s", (cid,))
         conn.commit()
         conn.close()
         await query.edit_message_text("Категория удалена. Обещания без категории.")
@@ -430,19 +438,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agreement = get_agreement_by_id(agr_id)
         if agreement:
             delete_agreement(agr_id)
-            await query.edit_message_text("🗑 Удалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 К списку", callback_data="show_list")]]))
+            await query.edit_message_text("🗑 Удалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 К активным", callback_data="show_list")]]))
         else:
             await query.edit_message_text("Уже удалено.")
     elif data.startswith("cancel_delete_"):
         user_id = query.from_user.id
-        text, markup = build_list_message(user_id)
+        text, markup = build_list_message(user_id, only_active=True)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
     elif data == "show_list":
         user_id = query.from_user.id
-        text, markup = build_list_message(user_id)
+        text, markup = build_list_message(user_id, only_active=True)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений (с исправленными иконками)
+# Обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -459,7 +467,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agr_id = context.user_data.pop('editing_agreement_id')
         update_agreement(agr_id, text)
         await update.message.reply_text(f"✏️ Изменено: \"{text}\"")
-        t, m = build_list_message(user_id)
+        t, m = build_list_message(user_id, only_active=True)
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
         return
 
@@ -472,9 +480,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton(name, callback_data=f"addcat_{cid}")] for cid, name in cats]
             keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
             await update.message.reply_text("Выбери категорию для обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif text == "📝 Мой список":
-        t, m = build_list_message(user_id)
+    elif text == "📝 Активные":
+        t, m = build_list_message(user_id, only_active=True)
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
+    elif text == "📜 История":
+        await history_command(update, context)
     elif text == "📂 Категории":
         await categories_menu(update, context)
     elif text == "⏰ Напоминания":
@@ -549,6 +559,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_agreement_command))
     application.add_handler(CommandHandler("list", list_agreements))
+    application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("achievements", achievements_command))
     application.add_handler(CommandHandler("export", export_command))
