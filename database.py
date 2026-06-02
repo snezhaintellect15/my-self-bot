@@ -5,7 +5,6 @@ from datetime import datetime, date, timedelta
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_connection():
-    """Создаёт и возвращает подключение к облачной базе Supabase"""
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
@@ -53,7 +52,7 @@ def init_db():
         )
     """)
 
-    # Таблица напоминаний
+    # Таблица ежедневных напоминаний (просто время)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
             user_id BIGINT PRIMARY KEY,
@@ -66,6 +65,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS daily_summary (
             user_id BIGINT PRIMARY KEY,
             summary_time TEXT NOT NULL
+        )
+    """)
+
+    # Новая таблица: запланированные напоминания с привязкой к обещанию
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_reminders (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            agreement_id INTEGER REFERENCES agreements(id) ON DELETE CASCADE,
+            remind_date DATE NOT NULL,
+            remind_time TIME NOT NULL,
+            is_recurring SMALLINT DEFAULT 0,
+            recurring_day INTEGER DEFAULT NULL,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -136,10 +149,6 @@ def add_agreement(user_id: int, text: str, category_id: int = None):
     conn.close()
 
 def get_agreements(user_id: int, only_active: bool = False):
-    """
-    Возвращает список обещаний.
-    Если only_active=True — только невыполненные, иначе все.
-    """
     conn = get_connection()
     cursor = conn.cursor()
     query = """
@@ -154,7 +163,7 @@ def get_agreements(user_id: int, only_active: bool = False):
     cursor.execute(query, (user_id,))
     agreements = cursor.fetchall()
     conn.close()
-    return agreements  # список кортежей (id, text, is_done, category_name)
+    return agreements
 
 def get_agreement_by_id(agreement_id: int):
     conn = get_connection()
@@ -185,7 +194,7 @@ def delete_agreement(agreement_id: int):
     conn.commit()
     conn.close()
 
-# ---------- Напоминания ----------
+# ---------- Ежедневные напоминания (старые) ----------
 def set_reminder(user_id: int, time_str: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -287,7 +296,6 @@ def get_stats(user_id: int) -> dict:
 
 # ---------- Экспорт ----------
 def get_agreements_export(user_id: int):
-    """Возвращает список кортежей (text, category_name, created_at, is_done, done_at) для экспорта"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -360,3 +368,53 @@ def check_achievements(user_id: int) -> list[str]:
 
     conn.close()
     return newly_awarded
+
+# ---------- Запланированные напоминания (новые) ----------
+def count_scheduled_reminders(user_id: int) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM scheduled_reminders WHERE user_id = %s", (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+def create_scheduled_reminder(user_id: int, agreement_id: int, remind_date: date, remind_time: str, is_recurring: bool = False, recurring_day: int = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO scheduled_reminders (user_id, agreement_id, remind_date, remind_time, is_recurring, recurring_day) VALUES (%s, %s, %s, %s, %s, %s)",
+        (user_id, agreement_id, remind_date.isoformat(), remind_time, int(is_recurring), recurring_day)
+    )
+    conn.commit()
+    conn.close()
+
+def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
+    """Возвращает список (id, user_id, agreement_text) для напоминаний, которые нужно отправить сейчас."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Сначала одноразовые на сегодня
+    cursor.execute("""
+        SELECT sr.id, sr.user_id, a.text
+        FROM scheduled_reminders sr
+        JOIN agreements a ON sr.agreement_id = a.id
+        WHERE sr.remind_date = %s AND sr.remind_time = %s AND sr.is_recurring = 0
+    """, (now_date.isoformat(), now_time))
+    results = cursor.fetchall()
+    # Затем повторяющиеся по дню недели (если сегодня нужный день)
+    weekday = now_date.weekday()  # 0=пн, 6=вс
+    cursor.execute("""
+        SELECT sr.id, sr.user_id, a.text
+        FROM scheduled_reminders sr
+        JOIN agreements a ON sr.agreement_id = a.id
+        WHERE sr.is_recurring = 1 AND sr.recurring_day = %s AND sr.remind_time = %s
+    """, (weekday, now_time))
+    results.extend(cursor.fetchall())
+    conn.close()
+    return results
+
+def delete_scheduled_reminder(reminder_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM scheduled_reminders WHERE id = %s", (reminder_id,))
+    conn.commit()
+    conn.close()

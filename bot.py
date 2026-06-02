@@ -13,7 +13,9 @@ from database import (init_db, create_user, is_premium, set_premium,
                       get_stats, get_agreements_export,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
-                      get_connection)
+                      get_connection,
+                      count_scheduled_reminders, create_scheduled_reminder,
+                      get_pending_reminders_for_now, delete_scheduled_reminder)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -65,7 +67,8 @@ def build_list_message(user_id: int, only_active: bool = True):
                 keyboard.append([
                     InlineKeyboardButton(f"✅ Вып. ({text[:15]})", callback_data=f"done_{agr_id}"),
                     InlineKeyboardButton(f"🗑 Удл.", callback_data=f"delete_{agr_id}"),
-                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}")
+                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}"),
+                    InlineKeyboardButton(f"🔔 Напомнить", callback_data=f"remindat_{agr_id}")
                 ])
 
     for cat, items in groups.items():
@@ -77,13 +80,14 @@ def build_list_message(user_id: int, only_active: bool = True):
                 keyboard.append([
                     InlineKeyboardButton(f"✅ Вып. ({text[:15]})", callback_data=f"done_{agr_id}"),
                     InlineKeyboardButton(f"🗑 Удл.", callback_data=f"delete_{agr_id}"),
-                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}")
+                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}"),
+                    InlineKeyboardButton(f"🔔 Напомнить", callback_data=f"remindat_{agr_id}")
                 ])
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (с разделением на Активные и Историю)
+# Главное меню
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
@@ -118,8 +122,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/summary — сводка за сегодня\n"
         "/setsummary ЧЧ:ММ — установить время ежедневной сводки\n"
         "/setsummary off — отключить ежедневную сводку\n"
-        "/remind ЧЧ:ММ — напоминание\n"
-        "/remind off — отключить напоминание\n"
+        "/remind ЧЧ:ММ — ежедневное напоминание о невыполненных\n"
+        "/remind off — отключить ежедневное напоминание\n"
+        "/remindat ДД.ММ ЧЧ:ММ [текст] — напомнить о конкретном обещании в дату/время\n"
         "/premium — инфо о премиуме и переключение (on/off)"
     )
 
@@ -137,7 +142,7 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
         name, desc = ACHIEVEMENTS[key]
         await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-# Список (теперь только активные)
+# Список (только активные)
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_list_message(user_id, only_active=True)
@@ -184,7 +189,7 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
         message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт (по-прежнему показывает всё)
+# Экспорт
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_agreements_export(user_id)
@@ -238,6 +243,7 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ **Премиум-возможности**\n"
         f"Твой статус: {status_text}\n\n"
         f"• Более одной категории (сейчас можно создать только 1)\n"
+        f"• Безлимитные напоминания на конкретные даты (через /remindat)\n"
         f"• Расширенные напоминания\n"
         f"• Статистика и экспорт\n"
         f"• Текстовый файл с экспортом\n\n"
@@ -263,20 +269,20 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🗑 Удалить категорию", callback_data="cat_delete_menu")])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Напоминания
+# Ежедневное напоминание (старое)
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
         current = get_reminder(user_id)
         if current:
-            await update.message.reply_text(f"Сейчас напоминание на {current}. /remind off — отключить, /remind ЧЧ:ММ — изменить.")
+            await update.message.reply_text(f"Сейчас ежедневное напоминание на {current}. /remind off — отключить, /remind ЧЧ:ММ — изменить.")
         else:
-            await update.message.reply_text("Напоминание не установлено. /remind 18:00")
+            await update.message.reply_text("Ежедневное напоминание не установлено. /remind 18:00")
         return
     arg = context.args[0].strip().lower()
     if arg == "off":
         delete_reminder(user_id)
-        await update.message.reply_text("🔕 Напоминание отключено.")
+        await update.message.reply_text("🔕 Ежедневное напоминание отключено.")
         return
     try:
         datetime.strptime(arg, "%H:%M")
@@ -284,7 +290,135 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 18:00")
         return
     set_reminder(user_id, arg)
-    await update.message.reply_text(f"⏰ Напоминание установлено на {arg}")
+    await update.message.reply_text(f"⏰ Ежедневное напоминание о невыполненных установлено на {arg}")
+
+# Новая команда: привязать напоминание к обещанию на дату/время
+async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text(
+            "Используй:\n"
+            "/remindat ДД.ММ ЧЧ:ММ <текст обещания> — напомнить о конкретном обещании в указанное время\n"
+            "/remindat ДД.ММ ЧЧ:ММ — затем бот попросит выбрать обещание из активных\n"
+            "/remindat каждую <день недели> ЧЧ:ММ <текст> — повторять еженедельно (например, каждую среду 09:00 Йога)\n"
+            "День недели: пн, вт, ср, чт, пт, сб, вс (или английские mon, tue, wed, thu, fri, sat, sun)"
+        )
+        return
+
+    args = context.args
+    # Проверка на повторяющееся
+    if args[0].lower() == "каждую":
+        if len(args) < 3:
+            await update.message.reply_text("Укажи день недели и время. Пример: /remindat каждую среду 09:00 Йога")
+            return
+        days_map = {
+            "пн": 0, "mon": 0,
+            "вт": 1, "tue": 1,
+            "ср": 2, "wed": 2,
+            "чт": 3, "thu": 3,
+            "пт": 4, "fri": 4,
+            "сб": 5, "sat": 5,
+            "вс": 6, "sun": 6
+        }
+        day_str = args[1].lower().rstrip(',')
+        if day_str not in days_map:
+            await update.message.reply_text("Неизвестный день недели. Используй пн, вт, ср, чт, пт, сб, вс (или английские сокращения)")
+            return
+        recurring_day = days_map[day_str]
+        time_str = args[2]
+        try:
+            datetime.strptime(time_str, "%H:%M")
+        except ValueError:
+            await update.message.reply_text("Неверный формат времени. Используй ЧЧ:ММ")
+            return
+        # Текст обещания (оставшиеся аргументы)
+        if len(args) > 3:
+            text = " ".join(args[3:])
+        else:
+            # Попросим выбрать из активных (упростим: пусть пользователь сначала введёт текст)
+            await update.message.reply_text("Введи текст обещания после команды, либо используй /remindat с кнопкой из списка активных.")
+            return
+        # Проверка лимита
+        if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+            await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
+            return
+        # Создаём обещание (или используем существующее? Пока просто создаём новое, но лучше бы выбирать)
+        add_agreement(user_id, text)
+        # Получаем id последнего созданного обещания
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM agreements WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+        agr_id = cursor.fetchone()[0]
+        conn.close()
+        # Дата напоминания: следующая среда, например. Рассчитываем ближайший нужный день недели.
+        today = date.today()
+        days_ahead = recurring_day - today.weekday()
+        if days_ahead <= 0:  # сегодня или прошло, берём следующую неделю
+            days_ahead += 7
+        next_date = today + timedelta(days=days_ahead)
+        create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
+        await update.message.reply_text(f"🔔 Напоминание о «{text}» будет приходить каждую {day_str.capitalize()} в {time_str} (начиная с {next_date.strftime('%d.%m.%Y')})")
+        return
+
+    # Одноразовое напоминание
+    if len(args) < 2:
+        await update.message.reply_text("Укажи дату и время. Пример: /remindat 05.06 18:00 Купить подарок")
+        return
+    date_str = args[0]
+    time_str = args[1]
+    try:
+        remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
+        # Если дата уже прошла в этом году, берём следующий год
+        if remind_date < date.today():
+            remind_date = remind_date.replace(year=date.today().year + 1)
+    except ValueError:
+        await update.message.reply_text("Неверный формат даты. Используй ДД.ММ (например, 05.06)")
+        return
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
+        await update.message.reply_text("Неверный формат времени. Используй ЧЧ:ММ")
+        return
+
+    if len(args) > 2:
+        text = " ".join(args[2:])
+    else:
+        await update.message.reply_text("Введи текст обещания после команды, либо используй кнопку «🔔 Напомнить» в списке активных.")
+        return
+
+    # Проверка лимита
+    if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+        await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
+        return
+
+    # Создаём обещание
+    add_agreement(user_id, text)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM agreements WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+    agr_id = cursor.fetchone()[0]
+    conn.close()
+    create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
+    await update.message.reply_text(f"🔔 Напоминание о «{text}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
+
+# Обработчик нажатия на кнопку «🔔 Напомнить»
+async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # remindat_123
+    if data.startswith("remindat_"):
+        agr_id = int(data.split("_")[1])
+        agreement = get_agreement_by_id(agr_id)
+        if not agreement:
+            await query.edit_message_text("Обещание не найдено.")
+            return
+        context.user_data['pending_remindat_agr_id'] = agr_id
+        await query.edit_message_text(
+            f"Введи дату и время для напоминания о «{agreement[1]}» в формате:\n"
+            "`ДД.ММ ЧЧ:ММ` (например, 05.06 18:00)\n"
+            "Или для еженедельного повтора: `каждую среду 09:00`",
+            parse_mode="Markdown"
+        )
 
 # Ежедневная сводка: ручная
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,7 +448,6 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     set_summary_time(user_id, arg)
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
-# Построение текста сводки
 async def build_daily_summary(user_id: int) -> str:
     conn = get_connection()
     cursor = conn.cursor()
@@ -340,14 +473,18 @@ async def build_daily_summary(user_id: int) -> str:
         message += "🔥 Отличный результат, продолжай в том же духе!"
     return message
 
-# Планировщик: проверка напоминаний и сводок
+# Планировщик: проверка всех типов напоминаний и сводок
 async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
-    now = (datetime.now(UTC) + MSK_OFFSET).strftime("%H:%M")
-    # Напоминания
+    now_utc = datetime.now(UTC)
+    now_msk = now_utc + MSK_OFFSET
+    now_time = now_msk.strftime("%H:%M")
+    today_msk = now_msk.date()
+
+    # 1. Ежедневные напоминания (старые)
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
-        if remind_time == now:
-            agreements = get_agreements(user_id, only_active=True)  # смотрим только активные
+        if remind_time == now_time:
+            agreements = get_agreements(user_id, only_active=True)
             if agreements:
                 undone = [(a[0], a[1]) for a in agreements if not a[2]]
                 if undone:
@@ -359,10 +496,24 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                         await context.application.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
                     except Exception as e:
                         logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
-    # Сводки
+
+    # 2. Запланированные напоминания (новые)
+    pending = get_pending_reminders_for_now(today_msk, now_time)
+    for reminder_id, user_id, text in pending:
+        try:
+            await context.application.bot.send_message(
+                chat_id=user_id,
+                text=f"🔔 **Напоминание:** {text}"
+            )
+            # Удаляем одноразовые после отправки
+            delete_scheduled_reminder(reminder_id)
+        except Exception as e:
+            logging.error(f"Ошибка отправки запланированного напоминания {reminder_id}: {e}")
+
+    # 3. Сводки
     users_summary = get_users_with_summary()
     for user_id, summary_time in users_summary:
-        if summary_time == now:
+        if summary_time == now_time:
             try:
                 await context.application.bot.send_message(
                     chat_id=user_id,
@@ -372,11 +523,15 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Ошибка отправки сводки {user_id}: {e}")
 
-# Обработчик кнопок
+# Обработчик кнопок (добавлена обработка remindat_)
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data.startswith("remindat_"):
+        await button_remindat(update, context)
+        return
 
     if data == "cat_create":
         user_id = query.from_user.id
@@ -449,11 +604,74 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id, only_active=True)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений
+# Обработчик сообщений (добавлен приём ввода после кнопки «🔔 Напомнить»)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
+    # Проверка, ожидается ли ввод даты/времени для remindat
+    if 'pending_remindat_agr_id' in context.user_data:
+        agr_id = context.user_data.pop('pending_remindat_agr_id')
+        parts = text.split()
+        if not parts:
+            await update.message.reply_text("Введи дату и время. Пример: 05.06 18:00 или каждую среду 09:00")
+            return
+        # Проверка на повторяющееся
+        if parts[0].lower() == "каждую":
+            days_map = {"пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,"вс":6,"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
+            if len(parts) < 3:
+                await update.message.reply_text("Укажи день недели и время. Пример: каждую среду 09:00")
+                return
+            day_str = parts[1].lower().rstrip(',')
+            if day_str not in days_map:
+                await update.message.reply_text("Неизвестный день недели.")
+                return
+            recurring_day = days_map[day_str]
+            time_str = parts[2]
+            try:
+                datetime.strptime(time_str, "%H:%M")
+            except ValueError:
+                await update.message.reply_text("Неверный формат времени.")
+                return
+            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
+                return
+            today = date.today()
+            days_ahead = recurring_day - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            next_date = today + timedelta(days=days_ahead)
+            create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
+            agreement = get_agreement_by_id(agr_id)
+            await update.message.reply_text(f"🔔 Напоминание о «{agreement[1]}» будет приходить каждую {day_str.capitalize()} в {time_str}")
+            return
+        else:
+            if len(parts) < 2:
+                await update.message.reply_text("Укажи дату и время через пробел. Пример: 05.06 18:00")
+                return
+            date_str = parts[0]
+            time_str = parts[1]
+            try:
+                remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
+                if remind_date < date.today():
+                    remind_date = remind_date.replace(year=date.today().year + 1)
+            except ValueError:
+                await update.message.reply_text("Неверный формат даты. Используй ДД.ММ")
+                return
+            try:
+                datetime.strptime(time_str, "%H:%M")
+            except ValueError:
+                await update.message.reply_text("Неверный формат времени.")
+                return
+            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
+                return
+            create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
+            agreement = get_agreement_by_id(agr_id)
+            await update.message.reply_text(f"🔔 Напоминание о «{agreement[1]}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
+        return
+
+    # Остальная обработка сообщений (как прежде)
     if context.user_data.get('awaiting_category_name'):
         del context.user_data['awaiting_category_name']
         if create_category(user_id, text):
@@ -489,9 +707,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "⏰ Напоминания":
         rem = get_reminder(user_id)
         if rem:
-            await update.message.reply_text(f"Напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
+            await update.message.reply_text(f"Ежедневное напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
         else:
-            await update.message.reply_text("Нет напоминания. /remind 18:00")
+            await update.message.reply_text("Ежедневное напоминание не установлено. /remind 18:00")
     elif text == "📋 Сводка":
         await summary_command(update, context)
     elif text == "📊 Статистика":
@@ -564,9 +782,10 @@ def main():
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
+    application.add_handler(CommandHandler("remindat", remindat_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("setsummary", set_summary_command))
-    application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
+    application.add_handler(CallbackQueryHandler(button_remindat, pattern="^remindat_"))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
