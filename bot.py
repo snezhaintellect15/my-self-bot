@@ -40,7 +40,6 @@ def keep_alive():
 # -----------------------
 
 # Вспомогательная: построение списка обещаний
-# Теперь принимает флаг only_active (по умолчанию True для /list)
 def build_list_message(user_id: int, only_active: bool = True):
     agreements = get_agreements(user_id, only_active=only_active)
     if not agreements:
@@ -84,7 +83,7 @@ def build_list_message(user_id: int, only_active: bool = True):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню (добавлена кнопка "📜 История")
+# Главное меню (с разделением на Активные и Историю)
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
