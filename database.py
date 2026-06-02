@@ -1,23 +1,34 @@
 import psycopg2
 import os
+import re
 import socket
-from urllib.parse import urlparse
 from datetime import datetime, date, timedelta
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_connection():
-    """Подключается к Supabase, принудительно используя IPv4"""
-    # Парсим URL, чтобы получить хост
-    parsed = urlparse(DATABASE_URL)
-    hostname = parsed.hostname  # например, db.xxxxx.supabase.co
+    """Подключается к Supabase, обрабатывая любой формат хоста (домен, IPv4, IPv6)"""
+    # Ожидаемый формат: postgresql://user:password@host:port/dbname
+    pattern = r'^postgresql://(.*?):(.*?)@(.*?):(\d+)/(.*?)$'
+    match = re.match(pattern, DATABASE_URL)
+    if not match:
+        raise ValueError(f"Невозможно разобрать DATABASE_URL: {DATABASE_URL}")
+    user, password, host, port, dbname = match.groups()
 
-    # Получаем IPv4-адрес по доменному имени
-    ipv4_address = socket.gethostbyname(hostname)
+    # Если хост уже IP-адрес (v4 или v6) — используем как есть
+    # Если это домен — получаем IPv4
+    try:
+        socket.inet_pton(socket.AF_INET, host)   # Это IPv4
+        host_ip = host
+    except OSError:
+        try:
+            socket.inet_pton(socket.AF_INET6, host)  # Это IPv6
+            host_ip = f"[{host}]"  # psycopg2 требует квадратные скобки для IPv6
+        except OSError:
+            # Это доменное имя
+            host_ip = socket.gethostbyname(host)
 
-    # Заменяем хост на IPv4-адрес в строке подключения
-    new_url = DATABASE_URL.replace(f"@{hostname}:", f"@{ipv4_address}:")
-
+    new_url = f"postgresql://{user}:{password}@{host_ip}:{port}/{dbname}"
     return psycopg2.connect(new_url, sslmode='require')
 
 def init_db():
