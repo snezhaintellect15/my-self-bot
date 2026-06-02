@@ -448,6 +448,7 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     set_summary_time(user_id, arg)
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
+# Построение текста сводки
 async def build_daily_summary(user_id: int) -> str:
     conn = get_connection()
     cursor = conn.cursor()

@@ -1,11 +1,24 @@
 import psycopg2
 import os
+import socket
+from urllib.parse import urlparse
 from datetime import datetime, date, timedelta
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    """Подключается к Supabase, принудительно используя IPv4"""
+    # Парсим URL, чтобы получить хост
+    parsed = urlparse(DATABASE_URL)
+    hostname = parsed.hostname  # например, db.xxxxx.supabase.co
+
+    # Получаем IPv4-адрес по доменному имени
+    ipv4_address = socket.gethostbyname(hostname)
+
+    # Заменяем хост на IPv4-адрес в строке подключения
+    new_url = DATABASE_URL.replace(f"@{hostname}:", f"@{ipv4_address}:")
+
+    return psycopg2.connect(new_url, sslmode='require')
 
 def init_db():
     conn = get_connection()
@@ -52,7 +65,7 @@ def init_db():
         )
     """)
 
-    # Таблица ежедневных напоминаний (просто время)
+    # Таблица напоминаний
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
             user_id BIGINT PRIMARY KEY,
@@ -68,7 +81,7 @@ def init_db():
         )
     """)
 
-    # Новая таблица: запланированные напоминания с привязкой к обещанию
+    # Таблица запланированных напоминаний
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_reminders (
             id SERIAL PRIMARY KEY,
@@ -194,7 +207,7 @@ def delete_agreement(agreement_id: int):
     conn.commit()
     conn.close()
 
-# ---------- Ежедневные напоминания (старые) ----------
+# ---------- Ежедневные напоминания ----------
 def set_reminder(user_id: int, time_str: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -369,7 +382,7 @@ def check_achievements(user_id: int) -> list[str]:
     conn.close()
     return newly_awarded
 
-# ---------- Запланированные напоминания (новые) ----------
+# ---------- Запланированные напоминания ----------
 def count_scheduled_reminders(user_id: int) -> int:
     conn = get_connection()
     cursor = conn.cursor()
@@ -389,10 +402,9 @@ def create_scheduled_reminder(user_id: int, agreement_id: int, remind_date: date
     conn.close()
 
 def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
-    """Возвращает список (id, user_id, agreement_text) для напоминаний, которые нужно отправить сейчас."""
     conn = get_connection()
     cursor = conn.cursor()
-    # Сначала одноразовые на сегодня
+    # Одноразовые на сегодня
     cursor.execute("""
         SELECT sr.id, sr.user_id, a.text
         FROM scheduled_reminders sr
@@ -400,8 +412,8 @@ def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
         WHERE sr.remind_date = %s AND sr.remind_time = %s AND sr.is_recurring = 0
     """, (now_date.isoformat(), now_time))
     results = cursor.fetchall()
-    # Затем повторяющиеся по дню недели (если сегодня нужный день)
-    weekday = now_date.weekday()  # 0=пн, 6=вс
+    # Повторяющиеся по дню недели
+    weekday = now_date.weekday()
     cursor.execute("""
         SELECT sr.id, sr.user_id, a.text
         FROM scheduled_reminders sr
