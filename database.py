@@ -9,17 +9,14 @@ client = MongoClient(MONGODB_URI)
 db = client["promise_bot"]
 
 def init_db():
-    """MongoDB создаёт коллекции автоматически."""
     pass
 
 # ---------- Пользователи ----------
 def create_user(user_id: int, referrer_id: int = None):
-    """Создаёт пользователя и, если указан referrer_id, начисляет бонусы."""
     user = db.users.find_one({"user_id": user_id})
     if user:
-        return  # уже существует
+        return
 
-    # Генерируем уникальный реферальный код
     ref_code = uuid.uuid4().hex[:8]
     new_user = {
         "user_id": user_id,
@@ -30,11 +27,8 @@ def create_user(user_id: int, referrer_id: int = None):
     }
     db.users.insert_one(new_user)
 
-    # Если есть пригласивший — начисляем бонусы
     if referrer_id:
-        # Приглашённый получает премиум на 3 дня
         set_premium(user_id, True, days=3)
-        # Пригласивший получает премиум на 7 дней (добавляем к текущему, если уже есть)
         referrer = db.users.find_one({"user_id": referrer_id})
         if referrer:
             current_until = referrer.get("premium_until")
@@ -55,16 +49,11 @@ def is_premium(user_id: int) -> bool:
         if user["premium_until"] > datetime.utcnow():
             return True
         else:
-            # Премиум истёк — сбрасываем флаг
-            db.users.update_one(
-                {"user_id": user_id},
-                {"$set": {"is_premium": False}}
-            )
+            db.users.update_one({"user_id": user_id}, {"$set": {"is_premium": False}})
             return False
     return user.get("is_premium", False)
 
 def set_premium(user_id: int, status: bool, days: int = 0):
-    """Устанавливает премиум-статус. Если days > 0, премиум действует указанное количество дней."""
     if days > 0:
         premium_until = datetime.utcnow() + timedelta(days=days)
         db.users.update_one(
@@ -80,18 +69,21 @@ def set_premium(user_id: int, status: bool, days: int = 0):
         )
 
 def get_ref_code(user_id: int) -> str | None:
-    """Возвращает реферальный код пользователя."""
+    """Возвращает реферальный код пользователя. Если кода нет — создаёт и сохраняет."""
     user = db.users.find_one({"user_id": user_id})
-    return user.get("ref_code") if user else None
+    if not user:
+        return None
+    ref_code = user.get("ref_code")
+    if not ref_code:
+        ref_code = uuid.uuid4().hex[:8]
+        db.users.update_one({"user_id": user_id}, {"$set": {"ref_code": ref_code}})
+    return ref_code
 
 def get_user_by_ref_code(ref_code: str):
-    """Находит пользователя по реферальному коду."""
     return db.users.find_one({"ref_code": ref_code})
 
 def get_referral_stats(user_id: int) -> dict:
-    """Возвращает статистику рефералов: количество приглашённых и активные."""
     total = db.users.count_documents({"referrer_id": user_id})
-    # Активные — те, кто создал хотя бы одно обещание
     active = len([
         u for u in db.users.find({"referrer_id": user_id})
         if db.agreements.count_documents({"user_id": u["user_id"]}) > 0
@@ -216,7 +208,6 @@ def get_stats(user_id: int) -> dict:
     done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done / total * 100, 1) if total > 0 else 0.0
 
-    # Streak (дни подряд с выполненными обещаниями)
     pipeline = [
         {"$match": {"user_id": user_id, "is_done": True}},
         {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}}},
