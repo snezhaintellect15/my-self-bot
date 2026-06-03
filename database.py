@@ -265,4 +265,4 @@ def delete_scheduled_reminder(reminder_id: str):
         oid = ObjectId(reminder_id)
     except:
         return
-    db.scheduled_reminders.delete_one({"_id": oid})
+    db.scheduled_reminders.delete_one({"_id": oid})  

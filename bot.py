@@ -14,7 +14,10 @@ from database import (init_db, create_user, is_premium, set_premium,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
                       count_scheduled_reminders, create_scheduled_reminder,
-                      get_pending_reminders_for_now, delete_scheduled_reminder)
+                      get_pending_reminders_for_now, delete_scheduled_reminder,
+                      db)  # <-- нужен для прямых вызовов в некоторых местах
+
+from bson.objectid import ObjectId
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -541,6 +544,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             oid = ObjectId(cat_id)
         except:
+            await query.edit_message_text("Неверный идентификатор категории.")
             return
         db.categories.delete_one({"_id": oid})
         await query.edit_message_text("Категория удалена.")
