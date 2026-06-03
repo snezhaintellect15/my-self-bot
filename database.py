@@ -1,31 +1,102 @@
 import os
+import uuid
 from datetime import datetime, date, timedelta
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 
 MONGODB_URI = os.environ.get("MONGODB_URI")
 client = MongoClient(MONGODB_URI)
-db = client["promise_bot"]  # название базы данных
+db = client["promise_bot"]
 
 def init_db():
-    """MongoDB создаёт коллекции автоматически, ничего не делаем."""
+    """MongoDB создаёт коллекции автоматически."""
     pass
 
 # ---------- Пользователи ----------
-def create_user(user_id: int):
-    if not db.users.find_one({"user_id": user_id}):
-        db.users.insert_one({"user_id": user_id, "is_premium": False})
+def create_user(user_id: int, referrer_id: int = None):
+    """Создаёт пользователя и, если указан referrer_id, начисляет бонусы."""
+    user = db.users.find_one({"user_id": user_id})
+    if user:
+        return  # уже существует
+
+    # Генерируем уникальный реферальный код
+    ref_code = uuid.uuid4().hex[:8]
+    new_user = {
+        "user_id": user_id,
+        "is_premium": False,
+        "premium_until": None,
+        "ref_code": ref_code,
+        "referrer_id": referrer_id
+    }
+    db.users.insert_one(new_user)
+
+    # Если есть пригласивший — начисляем бонусы
+    if referrer_id:
+        # Приглашённый получает премиум на 3 дня
+        set_premium(user_id, True, days=3)
+        # Пригласивший получает премиум на 7 дней (добавляем к текущему, если уже есть)
+        referrer = db.users.find_one({"user_id": referrer_id})
+        if referrer:
+            current_until = referrer.get("premium_until")
+            if current_until and current_until > datetime.utcnow():
+                new_until = current_until + timedelta(days=7)
+            else:
+                new_until = datetime.utcnow() + timedelta(days=7)
+            db.users.update_one(
+                {"user_id": referrer_id},
+                {"$set": {"is_premium": True, "premium_until": new_until}}
+            )
 
 def is_premium(user_id: int) -> bool:
     user = db.users.find_one({"user_id": user_id})
-    return user.get("is_premium", False) if user else False
+    if not user:
+        return False
+    if user.get("is_premium") and user.get("premium_until"):
+        if user["premium_until"] > datetime.utcnow():
+            return True
+        else:
+            # Премиум истёк — сбрасываем флаг
+            db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"is_premium": False}}
+            )
+            return False
+    return user.get("is_premium", False)
 
-def set_premium(user_id: int, status: bool):
-    db.users.update_one(
-        {"user_id": user_id},
-        {"$set": {"is_premium": status}},
-        upsert=True
-    )
+def set_premium(user_id: int, status: bool, days: int = 0):
+    """Устанавливает премиум-статус. Если days > 0, премиум действует указанное количество дней."""
+    if days > 0:
+        premium_until = datetime.utcnow() + timedelta(days=days)
+        db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_premium": True, "premium_until": premium_until}},
+            upsert=True
+        )
+    else:
+        db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_premium": status}},
+            upsert=True
+        )
+
+def get_ref_code(user_id: int) -> str | None:
+    """Возвращает реферальный код пользователя."""
+    user = db.users.find_one({"user_id": user_id})
+    return user.get("ref_code") if user else None
+
+def get_user_by_ref_code(ref_code: str):
+    """Находит пользователя по реферальному коду."""
+    return db.users.find_one({"ref_code": ref_code})
+
+def get_referral_stats(user_id: int) -> dict:
+    """Возвращает статистику рефералов: количество приглашённых и активные."""
+    total = db.users.count_documents({"referrer_id": user_id})
+    # Активные — те, кто создал хотя бы одно обещание
+    active = len([
+        u for u in db.users.find({"referrer_id": user_id})
+        if db.agreements.count_documents({"user_id": u["user_id"]}) > 0
+    ])
+    return {"total": total, "active": active}
 
 # ---------- Категории ----------
 def create_category(user_id: int, name: str) -> bool:
@@ -206,7 +277,6 @@ def check_achievements(user_id: int) -> list[str]:
     newly_awarded = []
     total_created = db.agreements.count_documents({"user_id": user_id})
     total_done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
-    # streak уже считается в get_stats, но мы можем переиспользовать
     stats = get_stats(user_id)
     streak = stats["streak"]
 
@@ -237,7 +307,6 @@ def create_scheduled_reminder(user_id: int, agreement_id: ObjectId, remind_date:
 
 def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
     results = []
-    # Одноразовые на сегодня
     one_time = db.scheduled_reminders.find({
         "remind_date": now_date.isoformat(),
         "remind_time": now_time,
@@ -247,7 +316,6 @@ def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
         agr = db.agreements.find_one({"_id": r["agreement_id"]})
         if agr:
             results.append((str(r["_id"]), r["user_id"], agr["text"]))
-    # Повторяющиеся по дню недели
     weekday = now_date.weekday()
     recurring = db.scheduled_reminders.find({
         "is_recurring": True,
@@ -265,4 +333,4 @@ def delete_scheduled_reminder(reminder_id: str):
         oid = ObjectId(reminder_id)
     except:
         return
-    db.scheduled_reminders.delete_one({"_id": oid})  
+    db.scheduled_reminders.delete_one({"_id": oid})

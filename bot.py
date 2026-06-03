@@ -15,8 +15,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
                       count_scheduled_reminders, create_scheduled_reminder,
                       get_pending_reminders_for_now, delete_scheduled_reminder,
-                      db)  # <-- нужен для прямых вызовов в некоторых местах
-
+                      get_ref_code, get_user_by_ref_code, get_referral_stats,
+                      db)
 from bson.objectid import ObjectId
 
 logging.basicConfig(
@@ -26,6 +26,7 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_USERNAME = "MyPromiseTrackerBot"  # замените на свой username бота (без @)
 MSK_OFFSET = timedelta(hours=3)
 
 # ---------- Flask ----------
@@ -102,20 +103,70 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("⏰ Напоминания"), KeyboardButton("📋 Сводка")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("⭐ Премиум")],
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")],
-        [KeyboardButton("❓ Помощь")]
+        [KeyboardButton("👥 Рефералы"), KeyboardButton("❓ Помощь")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-# Старт
+# Старт (с реферальной ссылкой)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    create_user(user_id)
-    await update.message.reply_text(
-        "Привет! Я бот-трекер «Договорился с собой».\n"
-        "С моей помощью ты можешь записывать обещания, распределять их по категориям и получать напоминания.\n"
-        "/menu — главное меню."
+    args = context.args
+
+    referrer_id = None
+    if args:
+        ref_code = args[0]
+        referrer = get_user_by_ref_code(ref_code)
+        if referrer:
+            referrer_id = referrer["user_id"]
+
+    create_user(user_id, referrer_id)
+
+    welcome_text = (
+        "👋 Привет! Я твой персональный трекер обещаний.\n\n"
+        "✨ Со мной ты можешь:\n"
+        "• Записывать обещания и цели\n"
+        "• Разделять их по категориям\n"
+        "• Получать напоминания и ежедневные сводки\n"
+        "• Отслеживать прогресс и достижения\n\n"
+        "📌 <b>Главное меню:</b> /menu\n"
+        "👥 Пригласи друга и получи <b>7 дней премиума</b> — /invite\n"
+        "ℹ️ Все команды: /help"
     )
+    await update.message.reply_text(welcome_text, parse_mode="HTML")
+
+    if referrer_id:
+        await update.message.reply_text("🎁 Вы перешли по реферальной ссылке! Вам начислено 3 дня премиума.")
+        try:
+            await context.application.bot.send_message(
+                chat_id=referrer_id,
+                text="🎉 По вашей реферальной ссылке зарегистрировался новый пользователь! Вы получили 7 дней премиума."
+            )
+        except:
+            pass
+
     await menu(update, context)
+
+# Реферальная программа
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ref_code = get_ref_code(user_id)
+    if not ref_code:
+        await update.message.reply_text("Не удалось сгенерировать реферальную ссылку.")
+        return
+
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={ref_code}"
+    stats = get_referral_stats(user_id)
+    message = (
+        "👥 **Реферальная программа**\n\n"
+        f"Ваша ссылка:\n`{ref_link}`\n\n"
+        "Приглашайте друзей и получайте бонусы!\n"
+        "• За каждого приглашённого — **7 дней премиума**.\n"
+        "• Приглашённый получает **3 дня премиума**.\n\n"
+        f"📊 **Ваша статистика:**\n"
+        f"• Приглашено всего: {stats['total']}\n"
+        f"• Активных: {stats['active']}"
+    )
+    await update.message.reply_text(message, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -131,6 +182,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/remind ЧЧ:ММ — ежедневное напоминание о невыполненных\n"
         "/remind off — отключить ежедневное напоминание\n"
         "/remindat ДД.ММ ЧЧ:ММ [текст] — напомнить о конкретном обещании в дату/время\n"
+        "/invite — реферальная ссылка и статистика\n"
         "/premium — инфо о премиуме и переключение (on/off)"
     )
 
@@ -248,11 +300,11 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"⭐ **Премиум-возможности**\n"
         f"Твой статус: {status_text}\n\n"
-        f"• Более одной категории (сейчас можно создать только 1)\n"
-        f"• Безлимитные напоминания на конкретные даты (через /remindat)\n"
-        f"• Расширенные напоминания\n"
-        f"• Статистика и экспорт\n"
-        f"• Текстовый файл с экспортом\n\n"
+        f"• Неограниченное количество категорий (сейчас можно создать только 1)\n"
+        f"• Безлимитные напоминания на конкретные даты через /remindat (бесплатно — 1)\n"
+        f"• Экспорт обещаний в текстовый файл\n\n"
+        f"👥 **Получить премиум бесплатно:**\n"
+        f"Пригласи друга по реферальной ссылке — и вы оба получите премиум-дни! /invite\n\n"
         f"Для теста: /premium on / /premium off",
         parse_mode="Markdown"
     )
@@ -312,7 +364,6 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    # Проверка на повторяющееся
     if args[0].lower() == "каждую":
         if len(args) < 3:
             await update.message.reply_text("Укажи день недели и время. Пример: /remindat каждую среду 09:00 Йога")
@@ -346,7 +397,6 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
             return
         add_agreement(user_id, text)
-        # получаем id последнего созданного обещания
         last_agr = get_agreements(user_id)[0]
         agr_id = last_agr["_id"]
         today = date.today()
@@ -358,7 +408,6 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔔 Напоминание о «{text}» будет приходить каждую {day_str.capitalize()} в {time_str}")
         return
 
-    # Одноразовое напоминание
     if len(args) < 2:
         await update.message.reply_text("Укажи дату и время. Пример: /remindat 05.06 18:00 Купить подарок")
         return
@@ -606,11 +655,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Введи дату и время. Пример: 05.06 18:00 или каждую среду 09:00")
             return
         if parts[0].lower() == "каждую":
-            # ... (аналогично remindat_command)
-            pass
+            days_map = {"пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,"вс":6,"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
+            if len(parts) < 3:
+                await update.message.reply_text("Укажи день недели и время. Пример: каждую среду 09:00")
+                return
+            day_str = parts[1].lower().rstrip(',')
+            if day_str not in days_map:
+                await update.message.reply_text("Неизвестный день недели.")
+                return
+            recurring_day = days_map[day_str]
+            time_str = parts[2]
+            try:
+                datetime.strptime(time_str, "%H:%M")
+            except ValueError:
+                await update.message.reply_text("Неверный формат времени.")
+                return
+            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
+                return
+            today = date.today()
+            days_ahead = recurring_day - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            next_date = today + timedelta(days=days_ahead)
+            create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
+            agreement = get_agreement_by_id(agr_id)
+            await update.message.reply_text(f"🔔 Напоминание о «{agreement['text']}» будет приходить каждую {day_str.capitalize()} в {time_str}")
+            return
         else:
-            # ... (аналогично remindat_command)
-            pass
+            if len(parts) < 2:
+                await update.message.reply_text("Укажи дату и время через пробел. Пример: 05.06 18:00")
+                return
+            date_str = parts[0]
+            time_str = parts[1]
+            try:
+                remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
+                if remind_date < date.today():
+                    remind_date = remind_date.replace(year=date.today().year + 1)
+            except ValueError:
+                await update.message.reply_text("Неверный формат даты.")
+                return
+            try:
+                datetime.strptime(time_str, "%H:%M")
+            except ValueError:
+                await update.message.reply_text("Неверный формат времени.")
+                return
+            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
+                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
+                return
+            create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
+            agreement = get_agreement_by_id(agr_id)
+            await update.message.reply_text(f"🔔 Напоминание о «{agreement['text']}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
         return
 
     if context.user_data.get('awaiting_category_name'):
@@ -659,6 +754,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await export_command(update, context)
     elif text == "🏆 Достижения":
         await achievements_command(update, context)
+    elif text == "👥 Рефералы":
+        await invite_command(update, context)
     elif text == "❓ Помощь":
         await help_command(update, context)
     elif text == "⭐ Премиум":
@@ -715,6 +812,7 @@ def main():
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CommandHandler("remindat", remindat_command))
+    application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("setsummary", set_summary_command))
     application.add_handler(CallbackQueryHandler(button_remindat, pattern="^remindat_"))
