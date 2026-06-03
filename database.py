@@ -1,291 +1,187 @@
-import sqlite3
+import os
 from datetime import datetime, date, timedelta
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
-DB_NAME = "agreements.db"
+MONGODB_URI = os.environ.get("MONGODB_URI")
+client = MongoClient(MONGODB_URI)
+db = client["promise_bot"]  # название базы данных
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            is_premium INTEGER DEFAULT 0
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            UNIQUE(user_id, name)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS agreements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            category_id INTEGER DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_done INTEGER DEFAULT 0,
-            done_at TIMESTAMP DEFAULT NULL,
-            FOREIGN KEY (category_id) REFERENCES categories (id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS achievements (
-            user_id INTEGER NOT NULL,
-            achievement_key TEXT NOT NULL,
-            awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, achievement_key)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            user_id INTEGER PRIMARY KEY,
-            remind_time TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS daily_summary (
-            user_id INTEGER PRIMARY KEY,
-            summary_time TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            agreement_id INTEGER REFERENCES agreements(id) ON DELETE CASCADE,
-            remind_date DATE NOT NULL,
-            remind_time TIME NOT NULL,
-            is_recurring INTEGER DEFAULT 0,
-            recurring_day INTEGER DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    try:
-        cursor.execute("ALTER TABLE agreements ADD COLUMN done_at TIMESTAMP DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE agreements ADD COLUMN category_id INTEGER DEFAULT NULL REFERENCES categories(id)")
-    except sqlite3.OperationalError:
-        pass
-
-    conn.commit()
-    conn.close()
+    """MongoDB создаёт коллекции автоматически, ничего не делаем."""
+    pass
 
 # ---------- Пользователи ----------
 def create_user(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
+    if not db.users.find_one({"user_id": user_id}):
+        db.users.insert_one({"user_id": user_id, "is_premium": False})
 
 def is_premium(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_premium FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row and row[0])
+    user = db.users.find_one({"user_id": user_id})
+    return user.get("is_premium", False) if user else False
 
 def set_premium(user_id: int, status: bool):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO users (user_id, is_premium) VALUES (?, ?)", (user_id, int(status)))
-    conn.commit()
-    conn.close()
+    db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"is_premium": status}},
+        upsert=True
+    )
 
 # ---------- Категории ----------
 def create_category(user_id: int, name: str) -> bool:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (user_id, name))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
+    existing = db.categories.find_one({"user_id": user_id, "name": name})
+    if existing:
         return False
+    db.categories.insert_one({"user_id": user_id, "name": name})
+    return True
 
 def get_categories(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? ORDER BY name", (user_id,))
-    categories = cursor.fetchall()
-    conn.close()
-    return categories
+    return list(db.categories.find({"user_id": user_id}, {"_id": 1, "name": 1}).sort("name", 1))
 
 def get_category_count(user_id: int) -> int:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM categories WHERE user_id = ?", (user_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    return db.categories.count_documents({"user_id": user_id})
 
 # ---------- Обещания ----------
-def add_agreement(user_id: int, text: str, category_id: int = None):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO agreements (user_id, text, category_id) VALUES (?, ?, ?)", (user_id, text, category_id))
-    conn.commit()
-    conn.close()
+def add_agreement(user_id: int, text: str, category_id: ObjectId = None):
+    doc = {
+        "user_id": user_id,
+        "text": text,
+        "category_id": category_id,
+        "created_at": datetime.utcnow(),
+        "is_done": False,
+        "done_at": None
+    }
+    db.agreements.insert_one(doc)
 
 def get_agreements(user_id: int, only_active: bool = False):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    query = """
-        SELECT a.id, a.text, a.is_done, c.name as category_name
-        FROM agreements a
-        LEFT JOIN categories c ON a.category_id = c.id
-        WHERE a.user_id = ?
-    """
+    filter = {"user_id": user_id}
     if only_active:
-        query += " AND a.is_done = 0"
-    query += " ORDER BY a.category_id IS NULL, c.name, a.created_at DESC"
-    cursor.execute(query, (user_id,))
-    agreements = cursor.fetchall()
-    conn.close()
-    return agreements
+        filter["is_done"] = False
+    pipeline = [
+        {"$match": filter},
+        {"$lookup": {
+            "from": "categories",
+            "localField": "category_id",
+            "foreignField": "_id",
+            "as": "category"
+        }},
+        {"$addFields": {
+            "category_name": {"$arrayElemAt": ["$category.name", 0]}
+        }},
+        {"$sort": {"created_at": -1}}
+    ]
+    return list(db.agreements.aggregate(pipeline))
 
-def get_agreement_by_id(agreement_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, text, is_done, user_id, category_id FROM agreements WHERE id = ?", (agreement_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
+def get_agreement_by_id(agreement_id: str):
+    try:
+        oid = ObjectId(agreement_id)
+    except:
+        return None
+    return db.agreements.find_one({"_id": oid})
 
-def update_agreement(agreement_id: int, new_text: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE agreements SET text = ? WHERE id = ?", (new_text, agreement_id))
-    conn.commit()
-    conn.close()
+def update_agreement(agreement_id: str, new_text: str):
+    try:
+        oid = ObjectId(agreement_id)
+    except:
+        return
+    db.agreements.update_one({"_id": oid}, {"$set": {"text": new_text}})
 
-def mark_done(agreement_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE agreements SET is_done = 1, done_at = CURRENT_TIMESTAMP WHERE id = ?", (agreement_id,))
-    conn.commit()
-    conn.close()
+def mark_done(agreement_id: str):
+    try:
+        oid = ObjectId(agreement_id)
+    except:
+        return
+    db.agreements.update_one(
+        {"_id": oid},
+        {"$set": {"is_done": True, "done_at": datetime.utcnow()}}
+    )
 
-def delete_agreement(agreement_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM agreements WHERE id = ?", (agreement_id,))
-    conn.commit()
-    conn.close()
+def delete_agreement(agreement_id: str):
+    try:
+        oid = ObjectId(agreement_id)
+    except:
+        return
+    db.agreements.delete_one({"_id": oid})
 
 # ---------- Ежедневные напоминания ----------
 def set_reminder(user_id: int, time_str: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO reminders (user_id, remind_time) VALUES (?, ?)", (user_id, time_str))
-    conn.commit()
-    conn.close()
+    db.reminders.update_one(
+        {"user_id": user_id},
+        {"$set": {"remind_time": time_str}},
+        upsert=True
+    )
 
 def delete_reminder(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    db.reminders.delete_one({"user_id": user_id})
 
 def get_reminder(user_id: int) -> str | None:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT remind_time FROM reminders WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
+    doc = db.reminders.find_one({"user_id": user_id})
+    return doc.get("remind_time") if doc else None
 
 def get_users_with_reminders() -> list[tuple[int, str]]:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, remind_time FROM reminders")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    return [(r["user_id"], r["remind_time"]) for r in db.reminders.find()]
 
 # ---------- Ежедневная сводка ----------
 def set_summary_time(user_id: int, time_str: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO daily_summary (user_id, summary_time) VALUES (?, ?)", (user_id, time_str))
-    conn.commit()
-    conn.close()
+    db.daily_summary.update_one(
+        {"user_id": user_id},
+        {"$set": {"summary_time": time_str}},
+        upsert=True
+    )
 
 def delete_summary_time(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM daily_summary WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    db.daily_summary.delete_one({"user_id": user_id})
 
 def get_summary_time(user_id: int) -> str | None:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT summary_time FROM daily_summary WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
+    doc = db.daily_summary.find_one({"user_id": user_id})
+    return doc.get("summary_time") if doc else None
 
 def get_users_with_summary() -> list[tuple[int, str]]:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, summary_time FROM daily_summary")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    return [(s["user_id"], s["summary_time"]) for s in db.daily_summary.find()]
 
 # ---------- Статистика ----------
 def get_stats(user_id: int) -> dict:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
-    total = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
-    done = cursor.fetchone()[0]
+    total = db.agreements.count_documents({"user_id": user_id})
+    done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done / total * 100, 1) if total > 0 else 0.0
-    cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
-    dates = [row[0] for row in cursor.fetchall()]
+
+    # Streak (дни подряд с выполненными обещаниями)
+    pipeline = [
+        {"$match": {"user_id": user_id, "is_done": True}},
+        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}}},
+        {"$sort": {"_id": -1}},
+        {"$limit": 365}
+    ]
+    dates = [datetime.strptime(d["_id"], "%Y-%m-%d").date() for d in db.agreements.aggregate(pipeline)]
     streak = 0
     if dates:
-        streak_end = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        streak_end = dates[0]
         streak = 1
         expected = streak_end - timedelta(days=1)
-        for d_str in dates[1:]:
-            d = datetime.strptime(d_str, "%Y-%m-%d").date()
+        for d in dates[1:]:
             if d == expected:
                 streak += 1
                 expected -= timedelta(days=1)
             else:
                 break
-    conn.close()
     return {"total": total, "done": done, "percent": percent, "streak": streak}
 
 # ---------- Экспорт ----------
 def get_agreements_export(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT a.text, c.name, a.created_at, a.is_done, a.done_at
-        FROM agreements a
-        LEFT JOIN categories c ON a.category_id = c.id
-        WHERE a.user_id = ?
-        ORDER BY a.created_at DESC
-    """, (user_id,))
-    data = cursor.fetchall()
-    conn.close()
-    return data
+    pipeline = [
+        {"$match": {"user_id": user_id}},
+        {"$lookup": {
+            "from": "categories",
+            "localField": "category_id",
+            "foreignField": "_id",
+            "as": "category"
+        }},
+        {"$addFields": {
+            "category_name": {"$arrayElemAt": ["$category.name", 0]}
+        }},
+        {"$sort": {"created_at": -1}}
+    ]
+    return list(db.agreements.aggregate(pipeline))
 
 # ---------- Достижения ----------
 ACHIEVEMENTS = {
@@ -295,99 +191,78 @@ ACHIEVEMENTS = {
 }
 
 def get_user_achievements(user_id: int) -> list[str]:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT achievement_key FROM achievements WHERE user_id = ?", (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+    doc = db.achievements.find_one({"user_id": user_id})
+    return doc.get("keys", []) if doc else []
 
 def award_achievement(user_id: int, key: str) -> bool:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO achievements (user_id, achievement_key) VALUES (?, ?)", (user_id, key))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
+    result = db.achievements.update_one(
+        {"user_id": user_id, "keys": {"$ne": key}},
+        {"$addToSet": {"keys": key}},
+        upsert=True
+    )
+    return result.modified_count > 0
 
 def check_achievements(user_id: int) -> list[str]:
     newly_awarded = []
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
-    total_created = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
-    total_done = cursor.fetchone()[0]
-    cursor.execute("SELECT DISTINCT DATE(created_at) as d FROM agreements WHERE user_id = ? AND is_done = 1 ORDER BY d DESC", (user_id,))
-    dates = [row[0] for row in cursor.fetchall()]
-    streak = 0
-    if dates:
-        streak_end = datetime.strptime(dates[0], "%Y-%m-%d").date()
-        streak = 1
-        expected = streak_end - timedelta(days=1)
-        for d_str in dates[1:]:
-            d = datetime.strptime(d_str, "%Y-%m-%d").date()
-            if d == expected:
-                streak += 1
-                expected -= timedelta(days=1)
-            else:
-                break
+    total_created = db.agreements.count_documents({"user_id": user_id})
+    total_done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
+    # streak уже считается в get_stats, но мы можем переиспользовать
+    stats = get_stats(user_id)
+    streak = stats["streak"]
+
     if total_created >= 10 and award_achievement(user_id, "novice"):
         newly_awarded.append("novice")
     if streak >= 7 and award_achievement(user_id, "discipline"):
         newly_awarded.append("discipline")
     if total_done >= 100 and award_achievement(user_id, "champion"):
         newly_awarded.append("champion")
-    conn.close()
     return newly_awarded
 
 # ---------- Запланированные напоминания ----------
 def count_scheduled_reminders(user_id: int) -> int:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM scheduled_reminders WHERE user_id = ?", (user_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    return db.scheduled_reminders.count_documents({"user_id": user_id})
 
-def create_scheduled_reminder(user_id: int, agreement_id: int, remind_date: date, remind_time: str, is_recurring: bool = False, recurring_day: int = None):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO scheduled_reminders (user_id, agreement_id, remind_date, remind_time, is_recurring, recurring_day) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, agreement_id, remind_date.isoformat(), remind_time, int(is_recurring), recurring_day)
-    )
-    conn.commit()
-    conn.close()
+def create_scheduled_reminder(user_id: int, agreement_id: ObjectId, remind_date: date, remind_time: str,
+                              is_recurring: bool = False, recurring_day: int = None):
+    doc = {
+        "user_id": user_id,
+        "agreement_id": agreement_id,
+        "remind_date": remind_date.isoformat(),
+        "remind_time": remind_time,
+        "is_recurring": is_recurring,
+        "recurring_day": recurring_day,
+        "created_at": datetime.utcnow()
+    }
+    db.scheduled_reminders.insert_one(doc)
 
 def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT sr.id, sr.user_id, a.text
-        FROM scheduled_reminders sr
-        JOIN agreements a ON sr.agreement_id = a.id
-        WHERE sr.remind_date = ? AND sr.remind_time = ? AND sr.is_recurring = 0
-    """, (now_date.isoformat(), now_time))
-    results = cursor.fetchall()
+    results = []
+    # Одноразовые на сегодня
+    one_time = db.scheduled_reminders.find({
+        "remind_date": now_date.isoformat(),
+        "remind_time": now_time,
+        "is_recurring": False
+    })
+    for r in one_time:
+        agr = db.agreements.find_one({"_id": r["agreement_id"]})
+        if agr:
+            results.append((str(r["_id"]), r["user_id"], agr["text"]))
+    # Повторяющиеся по дню недели
     weekday = now_date.weekday()
-    cursor.execute("""
-        SELECT sr.id, sr.user_id, a.text
-        FROM scheduled_reminders sr
-        JOIN agreements a ON sr.agreement_id = a.id
-        WHERE sr.is_recurring = 1 AND sr.recurring_day = ? AND sr.remind_time = ?
-    """, (weekday, now_time))
-    results.extend(cursor.fetchall())
-    conn.close()
+    recurring = db.scheduled_reminders.find({
+        "is_recurring": True,
+        "recurring_day": weekday,
+        "remind_time": now_time
+    })
+    for r in recurring:
+        agr = db.agreements.find_one({"_id": r["agreement_id"]})
+        if agr:
+            results.append((str(r["_id"]), r["user_id"], agr["text"]))
     return results
 
-def delete_scheduled_reminder(reminder_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM scheduled_reminders WHERE id = ?", (reminder_id,))
-    conn.commit()
-    conn.close()
+def delete_scheduled_reminder(reminder_id: str):
+    try:
+        oid = ObjectId(reminder_id)
+    except:
+        return
+    db.scheduled_reminders.delete_one({"_id": oid})

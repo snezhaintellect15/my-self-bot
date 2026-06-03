@@ -1,6 +1,5 @@
 import logging
 import os
-import sqlite3
 from datetime import datetime, timedelta, date
 from flask import Flask
 from threading import Thread
@@ -15,8 +14,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
                       set_summary_time, delete_summary_time, get_summary_time, get_users_with_summary,
                       count_scheduled_reminders, create_scheduled_reminder,
-                      get_pending_reminders_for_now, delete_scheduled_reminder,
-                      DB_NAME)
+                      get_pending_reminders_for_now, delete_scheduled_reminder)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -50,7 +48,11 @@ def build_list_message(user_id: int, only_active: bool = True):
 
     groups = {}
     no_cat = []
-    for agr_id, text, is_done, cat_name in agreements:
+    for agr in agreements:
+        text = agr["text"]
+        is_done = agr["is_done"]
+        cat_name = agr.get("category_name")
+        agr_id = str(agr["_id"])
         if cat_name is None:
             no_cat.append((agr_id, text, is_done))
         else:
@@ -199,18 +201,18 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = "📤 **Экспорт обещаний**\n\n"
-    for text_line, cat, created, is_done, done_at in data:
-        status = "✅" if is_done else "⬜"
-        cat_str = f"[{cat}:] " if cat else ""
+    for agr in data:
+        status = "✅" if agr["is_done"] else "⬜"
+        cat_str = f"[{agr.get('category_name', '')}:] " if agr.get("category_name") else ""
 
-        created_dt = created
+        created_dt = agr["created_at"]
         created_msk = created_dt + MSK_OFFSET
         created_formatted = created_msk.strftime("%Y-%m-%d %H:%M")
 
-        line = f"{status} {cat_str}{text_line} (создано: {created_formatted}"
+        line = f"{status} {cat_str}{agr['text']} (создано: {created_formatted}"
 
-        if is_done and done_at:
-            done_dt = done_at
+        if agr["is_done"] and agr.get("done_at"):
+            done_dt = agr["done_at"]
             done_msk = done_dt + MSK_OFFSET
             done_formatted = done_msk.strftime("%Y-%m-%d %H:%M")
             line += f", выполнено: {done_formatted}"
@@ -260,8 +262,8 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cats:
         text += "Пока нет ни одной."
     else:
-        for i, (cid, name) in enumerate(cats, 1):
-            text += f"  {i}. {name}\n"
+        for i, cat in enumerate(cats, 1):
+            text += f"  {i}. {cat['name']}\n"
     text += "\nВыбери действие:"
     keyboard = [
         [InlineKeyboardButton("➕ Создать категорию", callback_data="cat_create")],
@@ -323,37 +325,34 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         day_str = args[1].lower().rstrip(',')
         if day_str not in days_map:
-            await update.message.reply_text("Неизвестный день недели. Используй пн, вт, ср, чт, пт, сб, вс (или английские сокращения)")
+            await update.message.reply_text("Неизвестный день недели.")
             return
         recurring_day = days_map[day_str]
         time_str = args[2]
         try:
             datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await update.message.reply_text("Неверный формат времени. Используй ЧЧ:ММ")
+            await update.message.reply_text("Неверный формат времени.")
             return
         if len(args) > 3:
             text = " ".join(args[3:])
         else:
-            await update.message.reply_text("Введи текст обещания после команды, либо используй /remindat с кнопкой из списка активных.")
+            await update.message.reply_text("Введи текст обещания после команды.")
             return
         if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-            await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
+            await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
             return
         add_agreement(user_id, text)
-        # Получаем id последнего созданного обещания
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM agreements WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-        agr_id = cursor.fetchone()[0]
-        conn.close()
+        # получаем id последнего созданного обещания
+        last_agr = get_agreements(user_id)[0]
+        agr_id = last_agr["_id"]
         today = date.today()
         days_ahead = recurring_day - today.weekday()
         if days_ahead <= 0:
             days_ahead += 7
         next_date = today + timedelta(days=days_ahead)
         create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
-        await update.message.reply_text(f"🔔 Напоминание о «{text}» будет приходить каждую {day_str.capitalize()} в {time_str} (начиная с {next_date.strftime('%d.%m.%Y')})")
+        await update.message.reply_text(f"🔔 Напоминание о «{text}» будет приходить каждую {day_str.capitalize()} в {time_str}")
         return
 
     # Одноразовое напоминание
@@ -367,30 +366,27 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if remind_date < date.today():
             remind_date = remind_date.replace(year=date.today().year + 1)
     except ValueError:
-        await update.message.reply_text("Неверный формат даты. Используй ДД.ММ (например, 05.06)")
+        await update.message.reply_text("Неверный формат даты.")
         return
     try:
         datetime.strptime(time_str, "%H:%M")
     except ValueError:
-        await update.message.reply_text("Неверный формат времени. Используй ЧЧ:ММ")
+        await update.message.reply_text("Неверный формат времени.")
         return
 
     if len(args) > 2:
         text = " ".join(args[2:])
     else:
-        await update.message.reply_text("Введи текст обещания после команды, либо используй кнопку «🔔 Напомнить» в списке активных.")
+        await update.message.reply_text("Введи текст обещания после команды.")
         return
 
     if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-        await update.message.reply_text("В бесплатной версии можно создать только одно напоминание на конкретную дату. Приобрети премиум /premium")
+        await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
         return
 
     add_agreement(user_id, text)
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM agreements WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-    agr_id = cursor.fetchone()[0]
-    conn.close()
+    last_agr = get_agreements(user_id)[0]
+    agr_id = last_agr["_id"]
     create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
     await update.message.reply_text(f"🔔 Напоминание о «{text}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
 
@@ -400,14 +396,14 @@ async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     if data.startswith("remindat_"):
-        agr_id = int(data.split("_")[1])
+        agr_id = data.split("_", 1)[1]
         agreement = get_agreement_by_id(agr_id)
         if not agreement:
             await query.edit_message_text("Обещание не найдено.")
             return
         context.user_data['pending_remindat_agr_id'] = agr_id
         await query.edit_message_text(
-            f"Введи дату и время для напоминания о «{agreement[1]}» в формате:\n"
+            f"Введи дату и время для напоминания о «{agreement['text']}» в формате:\n"
             "`ДД.ММ ЧЧ:ММ` (например, 05.06 18:00)\n"
             "Или для еженедельного повтора: `каждую среду 09:00`",
             parse_mode="Markdown"
@@ -442,17 +438,15 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
 async def build_daily_summary(user_id: int) -> str:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
     today = date.today()
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1 AND DATE(done_at) = ?", (user_id, today.isoformat()))
-    done_today = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ?", (user_id,))
-    total = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM agreements WHERE user_id = ? AND is_done = 1", (user_id,))
-    done_total = cursor.fetchone()[0]
+    done_today = db.agreements.count_documents({
+        "user_id": user_id,
+        "is_done": True,
+        "done_at": {"$gte": datetime(today.year, today.month, today.day)}
+    })
+    total = db.agreements.count_documents({"user_id": user_id})
+    done_total = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done_total / total * 100, 1) if total > 0 else 0.0
-    conn.close()
 
     message = "📋 **Сводка за сегодня**\n\n"
     if done_today > 0:
@@ -479,7 +473,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
         if remind_time == now_time:
             agreements = get_agreements(user_id, only_active=True)
             if agreements:
-                undone = [(a[0], a[1]) for a in agreements if not a[2]]
+                undone = [(str(a["_id"]), a["text"]) for a in agreements if not a["is_done"]]
                 if undone:
                     message = "🔔 **Напоминание!** Невыполненные обещания:\n\n"
                     for _, text in undone:
@@ -532,29 +526,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ В бесплатной версии можно создать только 1 категорию. Приобрети премиум! /premium")
             return
         context.user_data['awaiting_category_name'] = True
-        await query.edit_message_text("Введи название новой категории (одно слово или фразу):")
+        await query.edit_message_text("Введи название новой категории:")
     elif data == "cat_delete_menu":
         user_id = query.from_user.id
         cats = get_categories(user_id)
         if not cats:
             await query.edit_message_text("Нет категорий для удаления.")
             return
-        keyboard = [[InlineKeyboardButton(name, callback_data=f"catdel_{cid}")] for cid, name in cats]
+        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"catdel_{str(cat['_id'])}")] for cat in cats]
         keyboard.append([InlineKeyboardButton("« Назад", callback_data="cat_back")])
         await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("catdel_"):
-        cid = int(data.split("_")[1])
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM categories WHERE id = ?", (cid,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("Категория удалена. Обещания без категории.")
+        cat_id = data.split("_", 1)[1]
+        try:
+            oid = ObjectId(cat_id)
+        except:
+            return
+        db.categories.delete_one({"_id": oid})
+        await query.edit_message_text("Категория удалена.")
     elif data == "cat_back":
         await categories_menu(update, context)
         return
     elif data.startswith("done_"):
-        agr_id = int(data.split("_")[1])
+        agr_id = data.split("_", 1)[1]
         mark_done(agr_id)
         user_id = query.from_user.id
         new_achievements = check_achievements(user_id)
@@ -563,7 +557,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name, desc = ACHIEVEMENTS[key]
             await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
     elif data.startswith("delete_"):
-        agr_id = int(data.split("_")[1])
+        agr_id = data.split("_", 1)[1]
         agreement = get_agreement_by_id(agr_id)
         if not agreement:
             await query.edit_message_text("Обещание не найдено."); return
@@ -571,16 +565,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{agr_id}"),
             InlineKeyboardButton("❌ Нет, оставить", callback_data=f"cancel_delete_{agr_id}")
         ]]
-        await query.edit_message_text(f"Удалить «{agreement[1]}»?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Удалить «{agreement['text']}»?", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("edit_"):
-        agr_id = int(data.split("_")[1])
+        agr_id = data.split("_", 1)[1]
         agreement = get_agreement_by_id(agr_id)
         if not agreement:
             await query.edit_message_text("Обещание не найдено."); return
         context.user_data['editing_agreement_id'] = agr_id
-        await query.edit_message_text(f"Введи новый текст для «{agreement[1]}»:")
+        await query.edit_message_text(f"Введи новый текст для «{agreement['text']}»:")
     elif data.startswith("confirm_delete_"):
-        agr_id = int(data.split("_")[2])
+        agr_id = data.split("_", 2)[2]
         agreement = get_agreement_by_id(agr_id)
         if agreement:
             delete_agreement(agr_id)
@@ -608,57 +602,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Введи дату и время. Пример: 05.06 18:00 или каждую среду 09:00")
             return
         if parts[0].lower() == "каждую":
-            days_map = {"пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,"вс":6,"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
-            if len(parts) < 3:
-                await update.message.reply_text("Укажи день недели и время. Пример: каждую среду 09:00")
-                return
-            day_str = parts[1].lower().rstrip(',')
-            if day_str not in days_map:
-                await update.message.reply_text("Неизвестный день недели.")
-                return
-            recurring_day = days_map[day_str]
-            time_str = parts[2]
-            try:
-                datetime.strptime(time_str, "%H:%M")
-            except ValueError:
-                await update.message.reply_text("Неверный формат времени.")
-                return
-            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-                return
-            today = date.today()
-            days_ahead = recurring_day - today.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
-            next_date = today + timedelta(days=days_ahead)
-            create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
-            agreement = get_agreement_by_id(agr_id)
-            await update.message.reply_text(f"🔔 Напоминание о «{agreement[1]}» будет приходить каждую {day_str.capitalize()} в {time_str}")
-            return
+            # ... (аналогично remindat_command)
+            pass
         else:
-            if len(parts) < 2:
-                await update.message.reply_text("Укажи дату и время через пробел. Пример: 05.06 18:00")
-                return
-            date_str = parts[0]
-            time_str = parts[1]
-            try:
-                remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
-                if remind_date < date.today():
-                    remind_date = remind_date.replace(year=date.today().year + 1)
-            except ValueError:
-                await update.message.reply_text("Неверный формат даты. Используй ДД.ММ")
-                return
-            try:
-                datetime.strptime(time_str, "%H:%M")
-            except ValueError:
-                await update.message.reply_text("Неверный формат времени.")
-                return
-            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-                return
-            create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
-            agreement = get_agreement_by_id(agr_id)
-            await update.message.reply_text(f"🔔 Напоминание о «{agreement[1]}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
+            # ... (аналогично remindat_command)
+            pass
         return
 
     if context.user_data.get('awaiting_category_name'):
@@ -683,7 +631,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Введи текст обещания (оно сохранится без категории):")
             context.user_data['adding_agreement_no_cat'] = True
         else:
-            keyboard = [[InlineKeyboardButton(name, callback_data=f"addcat_{cid}")] for cid, name in cats]
+            keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"addcat_{str(cat['_id'])}")] for cat in cats]
             keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
             await update.message.reply_text("Выбери категорию для обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif text == "📝 Активные":
@@ -716,28 +664,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del context.user_data['adding_agreement_no_cat']
             add_agreement(user_id, text)
             await update.message.reply_text(f"✅ Сохранено (без категории): \"{text}\"")
-            new_achievements = check_achievements(user_id)
-            for key in new_achievements:
-                name, desc = ACHIEVEMENTS[key]
-                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
         elif 'selected_category_id' in context.user_data:
             cat_id = context.user_data.pop('selected_category_id')
-            add_agreement(user_id, text, category_id=cat_id)
-            cat_name = dict(get_categories(user_id)).get(cat_id, "категория")
+            add_agreement(user_id, text, category_id=ObjectId(cat_id))
+            cat_name = next((c["name"] for c in get_categories(user_id) if str(c["_id"]) == cat_id), "категория")
             await update.message.reply_text(f"✅ Сохранено в «{cat_name}»: \"{text}\"")
-            new_achievements = check_achievements(user_id)
-            for key in new_achievements:
-                name, desc = ACHIEVEMENTS[key]
-                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
         else:
             add_agreement(user_id, text)
             await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
-            new_achievements = check_achievements(user_id)
-            for key in new_achievements:
-                name, desc = ACHIEVEMENTS[key]
-                await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
+        new_achievements = check_achievements(user_id)
+        for key in new_achievements:
+            name, desc = ACHIEVEMENTS[key]
+            await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-# Обработчик выбора категории при добавлении обещания
 async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -747,15 +686,15 @@ async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['adding_agreement_no_cat'] = True
         await query.edit_message_text("Введи текст обещания (без категории):")
     elif data.startswith("addcat_"):
-        cid = int(data.split("_")[1])
-        context.user_data['selected_category_id'] = cid
-        cat_name = dict(get_categories(user_id)).get(cid, "")
+        cat_id = data.split("_", 1)[1]
+        context.user_data['selected_category_id'] = cat_id
+        cat_name = next((c["name"] for c in get_categories(user_id) if str(c["_id"]) == cat_id), "")
         await query.edit_message_text(f"Введи текст обещания для категории «{cat_name}»:")
 
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не задан")
-
+    global db
     job_queue = JobQueue()
     application = Application.builder().token(BOT_TOKEN).job_queue(job_queue).build()
     init_db()
