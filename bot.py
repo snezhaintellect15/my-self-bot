@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = "MyPromiseTrackerBot"  # замените на свой username бота (без @)
+BOT_USERNAME = "MyPromiseTrackerBot"  # замени на свой username бота (без @)
 MSK_OFFSET = timedelta(hours=3)
 
 # ---------- Flask ----------
@@ -44,7 +44,6 @@ def keep_alive():
     Thread(target=run_flask).start()
 # -----------------------
 
-# Вспомогательная: построение списка обещаний
 def build_list_message(user_id: int, only_active: bool = True):
     agreements = get_agreements(user_id, only_active=only_active)
     if not agreements:
@@ -94,7 +93,6 @@ def build_list_message(user_id: int, only_active: bool = True):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
 
-# Главное меню
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("➕ Новое обещание")],
@@ -107,7 +105,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-# Старт (с реферальной ссылкой)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
@@ -146,7 +143,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await menu(update, context)
 
-# Реферальная программа
 async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ref_code = get_ref_code(user_id)
@@ -186,7 +182,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/premium — инфо о премиуме и переключение (on/off)"
     )
 
-# Быстрое добавление без категории
 async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -200,19 +195,16 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
         name, desc = ACHIEVEMENTS[key]
         await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-# Список (только активные)
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_list_message(user_id, only_active=True)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# История (выполненные)
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_list_message(user_id, only_active=False)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Статистика
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_stats(user_id)
@@ -235,7 +227,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"  {name} — {desc}\n"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Достижения
 async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     achieved = get_user_achievements(user_id)
@@ -247,7 +238,6 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
         message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# Экспорт
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_agreements_export(user_id)
@@ -287,7 +277,6 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# Премиум
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
@@ -309,7 +298,6 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Управление категориями
 async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cats = get_categories(user_id)
@@ -327,7 +315,6 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🗑 Удалить категорию", callback_data="cat_delete_menu")])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Ежедневное напоминание
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -350,7 +337,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_reminder(user_id, arg)
     await update.message.reply_text(f"⏰ Ежедневное напоминание о невыполненных установлено на {arg}")
 
-# Новая команда: привязать напоминание к обещанию на дату/время
 async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -442,7 +428,6 @@ async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
     await update.message.reply_text(f"🔔 Напоминание о «{text}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
 
-# Обработчик нажатия на кнопку «🔔 Напомнить»
 async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -461,12 +446,10 @@ async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# Ежедневная сводка: ручная
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text(await build_daily_summary(user_id))
 
-# Ежедневная сводка: настройка времени
 async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -512,14 +495,12 @@ async def build_daily_summary(user_id: int) -> str:
         message += "🔥 Отличный результат, продолжай в том же духе!"
     return message
 
-# Планировщик: проверка всех типов напоминаний и сводок
 async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.utcnow()
     now_msk = now_utc + MSK_OFFSET
     now_time = now_msk.strftime("%H:%M")
     today_msk = now_msk.date()
 
-    # 1. Ежедневные напоминания
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
         if remind_time == now_time:
@@ -536,7 +517,6 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
 
-    # 2. Запланированные напоминания (новые)
     pending = get_pending_reminders_for_now(today_msk, now_time)
     for reminder_id, user_id, text in pending:
         try:
@@ -548,7 +528,6 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"Ошибка отправки запланированного напоминания {reminder_id}: {e}")
 
-    # 3. Сводки
     users_summary = get_users_with_summary()
     for user_id, summary_time in users_summary:
         if summary_time == now_time:
@@ -561,7 +540,6 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Ошибка отправки сводки {user_id}: {e}")
 
-# Обработчик кнопок
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -643,7 +621,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_list_message(user_id, only_active=True)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# Обработчик сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -816,6 +793,7 @@ def main():
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("setsummary", set_summary_command))
     application.add_handler(CallbackQueryHandler(button_remindat, pattern="^remindat_"))
+    application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))   # ← вот эта строка была пропущена!
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
