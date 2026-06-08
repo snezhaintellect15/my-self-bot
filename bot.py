@@ -217,16 +217,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/premium — инфо о премиуме и переключение (on/off)"
     )
 
+# --- Добавление обещания (теперь выбор сложности для любого текста) ---
 async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
         await update.message.reply_text("Напиши текст после /add. Пример: `/add Прочитать книгу`")
         return
     text = " ".join(context.args)
+    await show_difficulty_selection(update, text)
+
+async def show_difficulty_selection(update: Update, text: str):
+    """Показывает кнопки выбора сложности для переданного текста."""
+    # Экранируем текст, чтобы он корректно передался в callback_data
+    safe_text = text.replace("|", " ").replace("_", " ")
     keyboard = [
-        [InlineKeyboardButton("🌱 Легко", callback_data=f"diff_{text}|0"),
-         InlineKeyboardButton("⚡️ Средне", callback_data=f"diff_{text}|1"),
-         InlineKeyboardButton("🔥 Хардкор", callback_data=f"diff_{text}|2")]
+        [InlineKeyboardButton("🌱 Легко", callback_data=f"diff_{safe_text}|0"),
+         InlineKeyboardButton("⚡️ Средне", callback_data=f"diff_{safe_text}|1"),
+         InlineKeyboardButton("🔥 Хардкор", callback_data=f"diff_{safe_text}|2")]
     ]
     await update.message.reply_text("Выбери сложность обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -682,7 +689,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         agreements = get_agreements(user_id, only_active=True)
         if agreements:
-            # Отмечаем первое невыполненное
             for a in agreements:
                 if not a["is_done"]:
                     mark_done(str(a["_id"]))
@@ -691,9 +697,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Все обещания уже выполнены!")
         return
     elif data.startswith("quickdelay_"):
-        # Просто удаляем сообщение с напоминанием
         await query.edit_message_text("⏳ Напоминание отложено на час. Я напомню позже.")
-        # Можно реализовать реальную задержку через job_queue, но пока заглушка
         return
     elif data.startswith("quickskip_"):
         await query.edit_message_text("❌ Пропущено. Не забудь выполнить позже!")
@@ -908,14 +912,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "➕ Новое обещание":
-        cats = get_categories(user_id)
-        if not cats:
-            await update.message.reply_text("Введи текст обещания (оно сохранится без категории):")
-            context.user_data['adding_agreement_no_cat'] = True
-        else:
-            keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"addcat_{str(cat['_id'])}")] for cat in cats]
-            keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
-            await update.message.reply_text("Выбери категорию для обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Напиши текст обещания, а затем выбери сложность.")
+        context.user_data['adding_agreement_no_cat'] = True
+        # Сразу показываем кнопки выбора сложности (ждём ввода текста следующим сообщением)
+        return
+
     elif text == "📝 Активные":
         t, m = build_list_message(user_id, only_active=True)
         await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
@@ -954,22 +955,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🪙 Баланс":
         await balance_command(update, context)
     else:
-        if context.user_data.get('adding_agreement_no_cat'):
-            del context.user_data['adding_agreement_no_cat']
-            add_agreement(user_id, text)
-            await update.message.reply_text(f"✅ Сохранено (без категории): \"{text}\"")
-        elif 'selected_category_id' in context.user_data:
-            cat_id = context.user_data.pop('selected_category_id')
-            add_agreement(user_id, text, category_id=ObjectId(cat_id))
-            cat_name = next((c["name"] for c in get_categories(user_id) if str(c["_id"]) == cat_id), "категория")
-            await update.message.reply_text(f"✅ Сохранено в «{cat_name}»: \"{text}\"")
-        else:
-            add_agreement(user_id, text)
-            await update.message.reply_text(f"✅ Сохранено: \"{text}\" (без категории)")
-        new_achievements = check_achievements(user_id)
-        for key in new_achievements:
-            name, desc = ACHIEVEMENTS[key]
-            await update.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
+        # Любой другой текст считаем попыткой добавить обещание
+        # Показываем выбор сложности
+        await show_difficulty_selection(update, text)
 
 async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
