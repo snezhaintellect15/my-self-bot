@@ -1,4 +1,4 @@
 python-telegram-bot[job-queue]
 flask
 pymongo[srv]
-fpdf2
+fpdf2[fonts]

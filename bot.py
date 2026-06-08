@@ -27,6 +27,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       db)
 from bson.objectid import ObjectId
 from fpdf import FPDF
+import fpdf
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -311,31 +312,38 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
         message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# --- Экспорт (добавлен PDF) ---
+# --- Экспорт (с поддержкой Unicode) ---
 def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list) -> bytes:
+    # Подключаем Unicode-шрифт Unifont (встроен в fpdf2[fonts])
+    font_path = os.path.join(os.path.dirname(fpdf.__file__), "fonts", "unifont.ttf")
     pdf = FPDF()
+    pdf.add_font("Unifont", fname=font_path, uni=True)
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    pdf.set_font("Helvetica", "B", 16)
+    # Заголовок
+    pdf.set_font("Unifont", size=16)
     pdf.cell(0, 10, "PromiseTracker Report", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
 
-    pdf.set_font("Helvetica", "I", 10)
+    # Дата
+    pdf.set_font("Unifont", size=10)
     pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(10)
 
-    pdf.set_font("Helvetica", "B", 14)
+    # Общая статистика
+    pdf.set_font("Unifont", size=14)
     pdf.cell(0, 10, "Overall Statistics", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 12)
+    pdf.set_font("Unifont", size=12)
     pdf.cell(0, 8, f"Total promises: {stats['total']}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Completed: {stats['done']} ({stats['percent']}%)", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Current streak: {stats['streak']} days", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
+    # Прогресс-бар
     bar_width = 100
     percent = stats['percent']
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Unifont", size=10)
     pdf.cell(0, 5, "Progress:", new_x="LMARGIN", new_y="NEXT")
     x = pdf.get_x()
     y = pdf.get_y()
@@ -345,17 +353,19 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list) -
         pdf.rect(x, y, filled, 5, style="F")
     pdf.ln(8)
 
+    # По категориям
     if cat_stats:
-        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_font("Unifont", size=14)
         pdf.cell(0, 10, "By Category", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 12)
+        pdf.set_font("Unifont", size=12)
         for cat in cat_stats:
             pdf.cell(0, 8, f"{cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(5)
 
-    pdf.set_font("Helvetica", "B", 14)
+    # Таблица обещаний
+    pdf.set_font("Unifont", size=14)
     pdf.cell(0, 10, "All Promises", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Unifont", size=10)
     col_widths = [15, 90, 40, 40]
     headers = ["Status", "Promise", "Category", "Date"]
     for i, header in enumerate(headers):
@@ -372,10 +382,11 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list) -
         pdf.cell(col_widths[3], 6, created, border=1)
         pdf.ln()
 
+    # ASCII-график
     pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_font("Unifont", size=14)
     pdf.cell(0, 10, "Progress Chart (ASCII)", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Courier", "", 8)
+    pdf.set_font("Unifont", size=8)
     max_len = 50
     done_len = int(max_len * percent / 100) if stats['total'] > 0 else 0
     chart_line = "Done: [" + "#" * done_len + "-" * (max_len - done_len) + f"] {percent}%"
@@ -1028,7 +1039,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🪙 Баланс":
         await balance_command(update, context)
     else:
-        # Любой другой текст считаем попыткой добавить обещание
         await show_difficulty_selection(update, text)
 
 async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
