@@ -19,6 +19,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       get_admin_stats, add_xp, get_xp, use_freeze,
                       get_pet, update_pet_stats, get_pet_message, change_pet,
                       get_shop_items, buy_item, get_inventory,
+                      get_coins, add_coins,  # <- новые функции
                       PET_TYPES,
                       create_daily_challenge, get_active_challenges, join_challenge,
                       check_challenge_completion, get_all_challenges_stats,
@@ -51,10 +52,15 @@ def keep_alive():
     Thread(target=run_flask).start()
 # -----------------------
 
-def build_list_message(user_id: int, only_active: bool = True):
-    agreements = get_agreements(user_id, only_active=only_active)
+def build_list_message(user_id: int, only_active: bool = False, only_done: bool = False):
+    agreements = get_agreements(user_id, only_active=only_active, only_done=only_done)
     if not agreements:
-        return ("У тебя пока нет активных обещаний.", None) if only_active else ("Нет выполненных обещаний.", None)
+        if only_active:
+            return "У тебя пока нет активных обещаний.", None
+        elif only_done:
+            return "Нет выполненных обещаний.", None
+        else:
+            return "У тебя пока нет ни одного обещания.", None
 
     diff_icons = {0: "🌱", 1: "⚡️", 2: "🔥"}
     groups = {}
@@ -117,7 +123,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📤 Экспорт"), KeyboardButton("🏆 Достижения")],
         [KeyboardButton("👥 Рефералы"), KeyboardButton("❓ Помощь")],
         [KeyboardButton("🐾 Питомец"), KeyboardButton("🛒 Магазин")],
-        [KeyboardButton("🛡 Заморозка"), KeyboardButton("🌍 Челленджи")]
+        [KeyboardButton("🛡 Заморозка"), KeyboardButton("🌍 Челленджи")],
+        [KeyboardButton("🪙 Баланс")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
@@ -136,6 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     xp = get_xp(user_id)
     level = xp // 100 + 1
+    coins = get_coins(user_id)
     welcome_text = (
         f"👋 Привет! Я твой персональный трекер обещаний.\n\n"
         f"✨ Со мной ты можешь:\n"
@@ -145,6 +153,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Отслеживать прогресс и достижения\n"
         f"• Делать фото-подтверждение выполненных обещаний\n\n"
         f"📊 Твой уровень: {level} (XP: {xp})\n"
+        f"🪙 Монеты: {coins}\n"
         f"📌 <b>Главное меню:</b> /menu\n"
         f"👥 Пригласи друга и получи <b>7 дней премиума</b> — /invite\n"
         f"ℹ️ Все команды: /help"
@@ -204,6 +213,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/shop — магазин достижений\n"
         "/freeze — заморозить день (премиум)\n"
         "/challenges — активные челленджи\n"
+        "/balance — твой баланс монет\n"
         "/premium — инфо о премиуме и переключение (on/off)"
     )
 
@@ -244,20 +254,22 @@ async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text, markup = build_list_message(user_id, only_active=False)
+    text, markup = build_list_message(user_id, only_done=True)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_stats(user_id)
     xp = get_xp(user_id)
+    coins = get_coins(user_id)
     level = xp // 100 + 1
     message = (
         "📊 **Твоя статистика:**\n\n"
         f"• Всего обещаний: {stats['total']}\n"
         f"• Выполнено: {stats['done']} ({stats['percent']}%)\n"
         f"• Дней подряд с выполненными обещаниями: {stats['streak']}\n"
-        f"• Уровень: {level} (XP: {xp})\n\n"
+        f"• Уровень: {level} (XP: {xp})\n"
+        f"• Монеты: {coins} 🪙\n\n"
     )
     cat_stats = get_stats_by_category(user_id)
     if cat_stats:
@@ -624,11 +636,12 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     if now_msk.strftime("%H:%M") == "23:55":
         challenges = get_active_challenges()
         for ch in challenges:
-            stats = check_challenge_completion(str(ch["_id"]))
-            if stats:
+            completed = check_challenge_completion(str(ch["_id"]))
+            if completed:
                 message = (
-                    f"🏁 **Итоги челленджа «{stats['title']}»**\n"
-                    f"✅ Выполнили: {len(stats['completed'])} из {len(ch.get('participants', []))}\n"
+                    f"🏁 **Итоги челленджа «{ch['title']}»**\n"
+                    f"✅ Выполнили: {len(completed)} из {len(ch.get('participants', []))}\n"
+                    f"Каждый выполнивший получил по 100 монет! 🪙"
                 )
                 for user_id in ch.get("participants", []):
                     try:
@@ -703,7 +716,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name, desc = ACHIEVEMENTS[key]
             await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-        # Предложить прикрепить фото
         if can_attach_photo(user_id):
             context.user_data['pending_photo_agreement_id'] = agr_id
             keyboard = [[
@@ -761,7 +773,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text if update.message.text else ""
     user_id = update.effective_user.id
 
-    # Проверка, ожидается ли фото
     if context.user_data.get('awaiting_photo') and update.message.photo:
         photo_file = update.message.photo[-1]
         photo_file_id = photo_file.file_id
@@ -896,6 +907,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await freeze_command(update, context)
     elif text == "🌍 Челленджи":
         await challenges_command(update, context)
+    elif text == "🪙 Баланс":
+        await balance_command(update, context)
     else:
         if context.user_data.get('adding_agreement_no_cat'):
             del context.user_data['adding_agreement_no_cat']
@@ -954,7 +967,7 @@ async def changepet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["premium"]:
             cost_text = "Только премиум"
         else:
-            cost_text = f"{info['cost']} XP" if info['cost'] > 0 else "Бесплатно"
+            cost_text = f"{info['cost']} монет" if info['cost'] > 0 else "Бесплатно"
         button_text = f"{info['emoji']} {info['name']} ({cost_text})"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
     await query.edit_message_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -974,11 +987,11 @@ async def changepet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     cost = info["cost"]
     if cost > 0:
-        current_xp = get_xp(user_id)
-        if current_xp < cost:
-            await query.edit_message_text(f"❌ Недостаточно XP. Нужно {cost}, у вас {current_xp}.")
+        current_coins = get_coins(user_id)
+        if current_coins < cost:
+            await query.edit_message_text(f"❌ Недостаточно монет. Нужно {cost}, у вас {current_coins}.")
             return
-    success = change_pet(user_id, pet_type, cost_xp=cost)
+    success = change_pet(user_id, pet_type, cost_xp=0, cost_coins=cost)  # теперь монеты
     if success:
         await query.edit_message_text(f"✅ Питомец изменён на {info['emoji']} {info['name']}!")
     else:
@@ -990,7 +1003,7 @@ async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["premium"]:
             cost_text = "Только премиум"
         else:
-            cost_text = f"{info['cost']} XP" if info['cost'] > 0 else "Бесплатно"
+            cost_text = f"{info['cost']} монет" if info['cost'] > 0 else "Бесплатно"
         button_text = f"{info['emoji']} {info['name']} ({cost_text})"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
     await update.message.reply_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -998,13 +1011,13 @@ async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Магазин ----------
 async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    xp = get_xp(user_id)
+    coins = get_coins(user_id)
     items = get_shop_items()
-    message = f"🛒 **Магазин достижений** (ваш XP: {xp})\n\n"
+    message = f"🛒 **Магазин достижений** (ваш баланс: {coins} 🪙)\n\n"
     keyboard = []
     for item in items:
-        message += f"{item['emoji']} {item['name']} — {item['cost']} XP\n"
-        keyboard.append([InlineKeyboardButton(f"Купить {item['name']} ({item['cost']} XP)", callback_data=f"buy_{item['id']}")])
+        message += f"{item['emoji']} {item['name']} — {item['cost']} 🪙\n"
+        keyboard.append([InlineKeyboardButton(f"Купить {item['name']} ({item['cost']} 🪙)", callback_data=f"buy_{item['id']}")])
     await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1057,6 +1070,11 @@ async def join_challenge_callback(update: Update, context: ContextTypes.DEFAULT_
         success, msg = join_challenge(user_id, challenge_id)
         await query.edit_message_text(msg)
 
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    coins = get_coins(user_id)
+    await update.message.reply_text(f"🪙 Ваш баланс: {coins} монет.")
+
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     admin_id = int(os.environ.get("ADMIN_ID", 0))
@@ -1102,6 +1120,7 @@ def main():
     application.add_handler(CommandHandler("shop", shop_command))
     application.add_handler(CommandHandler("freeze", freeze_command))
     application.add_handler(CommandHandler("challenges", challenges_command))
+    application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("admin", admin_stats_command))
     application.add_handler(CallbackQueryHandler(button_remindat, pattern="^remindat_"))
     application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))

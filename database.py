@@ -82,7 +82,7 @@ def change_pet(user_id: int, new_type: str, cost_xp: int = 0) -> bool:
     db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}})
     return True
 
-# ---------- Магазин ----------
+# ---------- Магазин (цены в монетах) ----------
 SHOP_ITEMS = [
     {"id": "badge_ninja", "name": "Ниндзя продуктивности", "cost": 500, "type": "badge", "emoji": "🥷"},
     {"id": "badge_master", "name": "Мастер дисциплины", "cost": 1000, "type": "badge", "emoji": "🏅"},
@@ -101,12 +101,12 @@ def buy_item(user_id: int, item_id: str) -> tuple[bool, str]:
     user = db.users.find_one({"user_id": user_id})
     if not user:
         return False, "Пользователь не найден."
-    if user.get("xp", 0) < item["cost"]:
-        return False, f"Недостаточно XP. Нужно {item['cost']}, у вас {user.get('xp', 0)}."
+    if user.get("coins", 0) < item["cost"]:
+        return False, f"Недостаточно монет. Нужно {item['cost']}, у вас {user.get('coins', 0)}."
     inventory = user.get("inventory", [])
     if item_id in inventory:
         return False, "У вас уже есть этот предмет."
-    db.users.update_one({"user_id": user_id}, {"$inc": {"xp": -item["cost"]}, "$addToSet": {"inventory": item_id}})
+    db.users.update_one({"user_id": user_id}, {"$inc": {"coins": -item["cost"]}, "$addToSet": {"inventory": item_id}})
     return True, f"Вы купили {item['emoji']} {item['name']}!"
 
 def get_inventory(user_id: int) -> list[str]:
@@ -125,10 +125,11 @@ def create_user(user_id: int, referrer_id: int = None):
     new_user = {
         "user_id": user_id, "is_premium": False, "premium_until": None,
         "ref_code": ref_code, "referrer_id": referrer_id, "xp": 0,
+        "coins": 0,  # <- новый счётчик монет
         "freezes_available": 0, "pet": None, "inventory": []
     }
     db.users.insert_one(new_user)
-    get_pet(user_id)  # сразу даём питомца
+    get_pet(user_id)
     if referrer_id:
         set_premium(user_id, True, days=3)
         referrer = db.users.find_one({"user_id": referrer_id})
@@ -170,6 +171,13 @@ def get_xp(user_id: int) -> int:
     user = db.users.find_one({"user_id": user_id})
     return user.get("xp", 0) if user else 0
 
+def add_coins(user_id: int, amount: int):
+    db.users.update_one({"user_id": user_id}, {"$inc": {"coins": amount}})
+
+def get_coins(user_id: int) -> int:
+    user = db.users.find_one({"user_id": user_id})
+    return user.get("coins", 0) if user else 0
+
 def use_freeze(user_id: int) -> bool:
     user = db.users.find_one({"user_id": user_id})
     if not user or user.get("freezes_available", 0) <= 0:
@@ -204,10 +212,12 @@ def add_agreement(user_id: int, text: str, category_id: ObjectId = None, difficu
     }
     db.agreements.insert_one(doc)
 
-def get_agreements(user_id: int, only_active: bool = False):
+def get_agreements(user_id: int, only_active: bool = False, only_done: bool = False):
     filter = {"user_id": user_id}
     if only_active:
         filter["is_done"] = False
+    elif only_done:
+        filter["is_done"] = True
     pipeline = [
         {"$match": filter},
         {"$lookup": {
@@ -246,12 +256,12 @@ def mark_done(agreement_id: str, photo_file_id: str = None):
     if photo_file_id:
         update["photo_file_id"] = photo_file_id
     db.agreements.update_one({"_id": oid}, {"$set": update})
-    # Начисляем XP
     agreement = db.agreements.find_one({"_id": oid})
     if agreement:
         xp_map = {0: 10, 1: 25, 2: 50}
         diff = agreement.get("difficulty", 0)
         add_xp(agreement["user_id"], xp_map.get(diff, 10))
+        add_coins(agreement["user_id"], 10)  # базовые монеты
 
 def delete_agreement(agreement_id: str):
     try:
@@ -331,7 +341,6 @@ def check_challenge_completion(challenge_id: str):
         return
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     completed = []
-    failed = []
     for user_id in challenge.get("participants", []):
         done = db.agreements.count_documents({
             "user_id": user_id, "is_done": True,
@@ -340,9 +349,8 @@ def check_challenge_completion(challenge_id: str):
         if done > 0:
             completed.append(user_id)
             db.challenges.update_one({"_id": oid}, {"$addToSet": {"completed": user_id}})
-        else:
-            failed.append(user_id)
-    return {"completed": completed, "failed": failed, "title": challenge["title"]}
+            add_coins(user_id, 100)  # бонус за выполнение челленджа
+    return completed
 
 def get_all_challenges_stats():
     week_ago = (date.today() - timedelta(days=7)).isoformat()
@@ -478,6 +486,7 @@ def check_achievements(user_id: int) -> list[str]:
         newly_awarded.append("novice")
     if streak >= 7 and award_achievement(user_id, "discipline"):
         newly_awarded.append("discipline")
+        add_coins(user_id, 50)  # бонус за стрик
     if total_done >= 100 and award_achievement(user_id, "champion"):
         newly_awarded.append("champion")
     return newly_awarded
