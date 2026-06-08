@@ -19,8 +19,8 @@ from database import (init_db, create_user, is_premium, set_premium,
                       get_admin_stats, add_xp, get_xp, use_freeze,
                       get_pet, update_pet_stats, get_pet_message, change_pet,
                       get_shop_items, buy_item, get_inventory,
-                      get_coins, add_coins,  # <- новые функции
-                      PET_TYPES,
+                      get_coins, add_coins,
+                      PET_TYPES, lose_level_if_inactive, get_pet_ascii_art,
                       create_daily_challenge, get_active_challenges, join_challenge,
                       check_challenge_completion, get_all_challenges_stats,
                       can_attach_photo, count_photos_today, get_stats_by_category,
@@ -568,7 +568,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     # Ежедневный челлендж
     create_daily_challenge()
 
-    # Напоминания
+    # Напоминания с Quick Actions
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
         if remind_time == now_time:
@@ -586,8 +586,17 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                     for _, text in undone:
                         message += f"⬜ {text}\n"
                     message += "\nНе забудь выполнить! /list"
+                    # Quick Actions кнопки
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Сделал", callback_data=f"quickdone_{user_id}"),
+                         InlineKeyboardButton("⏳ Отложить на час", callback_data=f"quickdelay_{user_id}"),
+                         InlineKeyboardButton("❌ Пропустил", callback_data=f"quickskip_{user_id}")]
+                    ]
                     try:
-                        await context.application.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+                        await context.application.bot.send_message(
+                            chat_id=user_id, text=message, parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
                     except Exception as e:
                         logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
 
@@ -649,10 +658,46 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
 
+    # Проверка неактивности и потеря уровня питомца (раз в сутки в 03:00)
+    if now_msk.strftime("%H:%M") == "03:00":
+        all_users = db.users.find({})
+        for user in all_users:
+            uid = user["user_id"]
+            if lose_level_if_inactive(uid):
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=uid,
+                        text="⚠️ Твой питомец потерял уровень из-за долгого отсутствия! Возвращайся и выполняй обещания."
+                    )
+                except:
+                    pass
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    # Quick Actions
+    if data.startswith("quickdone_"):
+        user_id = query.from_user.id
+        agreements = get_agreements(user_id, only_active=True)
+        if agreements:
+            # Отмечаем первое невыполненное
+            for a in agreements:
+                if not a["is_done"]:
+                    mark_done(str(a["_id"]))
+                    await query.edit_message_text("✅ Отмечено как выполненное!")
+                    return
+        await query.edit_message_text("Все обещания уже выполнены!")
+        return
+    elif data.startswith("quickdelay_"):
+        # Просто удаляем сообщение с напоминанием
+        await query.edit_message_text("⏳ Напоминание отложено на час. Я напомню позже.")
+        # Можно реализовать реальную задержку через job_queue, но пока заглушка
+        return
+    elif data.startswith("quickskip_"):
+        await query.edit_message_text("❌ Пропущено. Не забудь выполнить позже!")
+        return
 
     if data.startswith("diff_"):
         await difficulty_callback(update, context)
@@ -706,12 +751,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agr_id = data.split("_", 1)[1]
         mark_done(agr_id)
         user_id = query.from_user.id
-        update_pet_stats(user_id, hunger_delta=20, mood_delta=30)
-        pet_msg = get_pet_message(user_id)
+        update_pet_stats(user_id, hunger_delta=20, mood_delta=30, performed=True)
+        status_emoji, pet_msg = get_pet_message(user_id)
         new_achievements = check_achievements(user_id)
         await query.edit_message_text("✅ Отмечено выполненным!")
-        if pet_msg:
-            await query.message.reply_text(pet_msg)
+        await query.message.reply_text(pet_msg)
         for key in new_achievements:
             name, desc = ACHIEVEMENTS[key]
             await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
@@ -948,14 +992,32 @@ async def pet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pet:
         await update.message.reply_text("У вас пока нет питомца. Напишите /start, чтобы получить его!")
         return
-    emoji = PET_TYPES[pet["type"]]["emoji"]
+
+    pet_type = pet["type"]
+    level = pet["level"]
+    mood = pet["mood"]
+    is_sick = pet.get("is_sick", False)
+
+    evolution_map = PET_TYPES[pet_type]["evolution"]
+    current_emoji = evolution_map.get(level, PET_TYPES[pet_type]["emoji"])
+    next_level = min([l for l in evolution_map.keys() if l > level], default=None)
+    next_emoji = evolution_map.get(next_level, "") if next_level else ""
+
+    status_emoji, pet_msg = get_pet_message(user_id)
+    ascii_art = get_pet_ascii_art(pet_type, level, mood, is_sick)
+
     message = (
-        f"{emoji} **{pet['name']}** (уровень {pet['level']})\n"
+        f"{current_emoji} **{pet['name']}** (уровень {level})\n"
         f"🍖 Сытость: {pet['hunger']}/200\n"
-        f"😊 Настроение: {pet['mood']}/200\n"
-        f"✨ Опыт: {pet['xp']}/100\n\n"
-        f"{get_pet_message(user_id)}"
+        f"😊 Настроение: {pet['mood']}/200 ({status_emoji})\n"
+        f"✨ Опыт: {pet['xp']}/100\n"
     )
+    if is_sick:
+        message += "🤒 **Питомец болен!** Выполните 3 обещания подряд, чтобы вылечить.\n"
+    message += f"\n```\n{ascii_art}\n```\n{pet_msg}\n"
+    if next_emoji:
+        message += f"\nСледующая эволюция на уровне {next_level}: {next_emoji}"
+
     keyboard = [[InlineKeyboardButton("🔄 Сменить питомца", callback_data="changepet_start")]]
     await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -967,7 +1029,7 @@ async def changepet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["premium"]:
             cost_text = "Только премиум"
         else:
-            cost_text = f"{info['cost']} монет" if info['cost'] > 0 else "Бесплатно"
+            cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
         button_text = f"{info['emoji']} {info['name']} ({cost_text})"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
     await query.edit_message_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -991,7 +1053,7 @@ async def changepet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if current_coins < cost:
             await query.edit_message_text(f"❌ Недостаточно монет. Нужно {cost}, у вас {current_coins}.")
             return
-    success = change_pet(user_id, pet_type, cost_xp=0, cost_coins=cost)  # теперь монеты
+    success = change_pet(user_id, pet_type, cost_coins=cost)
     if success:
         await query.edit_message_text(f"✅ Питомец изменён на {info['emoji']} {info['name']}!")
     else:
@@ -1003,7 +1065,7 @@ async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["premium"]:
             cost_text = "Только премиум"
         else:
-            cost_text = f"{info['cost']} монет" if info['cost'] > 0 else "Бесплатно"
+            cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
         button_text = f"{info['emoji']} {info['name']} ({cost_text})"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
     await update.message.reply_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))

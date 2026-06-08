@@ -13,26 +13,35 @@ db = client["promise_bot"]
 PET_TYPES = {
     "cat": {
         "name": "Котёнок", "emoji": "🐱", "cost": 0, "premium": False,
+        "evolution": {1: "🥚", 2: "🐣", 3: "🐱", 5: "🐈", 10: "🦁"},
         "mood_messages": {
             "happy": ["Мяу! Ты молодец, хозяин!", "Ура, меня покормили!", "Мур-мур, спасибо!"],
             "sad": ["Мяу... ты забыл про меня...", "Мне грустно без тебя...", "Покорми меня, пожалуйста!"],
-            "danger": ["Я могу убежать, если ты не будешь выполнять обещания!", "Мяу! Моё настроение на нуле!"]
+            "danger": ["💀 Я исчезаю...", "Мяу! Моё настроение на нуле!"],
+            "excellent": ["😎 Я в отличной форме!", "Мур-мур! Лучший день!"],
+            "sick": ["🤒 Я заболел... Мне нужно больше заботы!", "Мяу... я неважно себя чувствую..."]
         }
     },
     "dog": {
         "name": "Щенок", "emoji": "🐶", "cost": 500, "premium": False,
+        "evolution": {1: "🥚", 2: "🐣", 3: "🐶", 5: "🐕", 10: "🦮"},
         "mood_messages": {
             "happy": ["Гав! Ты лучший!", "Ура, гулять!", "Спасибо, хозяин!"],
             "sad": ["Гав... я скучаю...", "Ты меня не выгулял...", "Мне одиноко..."],
-            "danger": ["Гав! Если ты не вернёшься, я убегу!", "Моё терпение на исходе!"]
+            "danger": ["💀 Я исчезаю...", "Гав! Моё терпение на исходе!"],
+            "excellent": ["😎 Я в отличной форме!", "Гав! Потрясающий день!"],
+            "sick": ["🤒 Я заболел... Мне нужно больше заботы!", "Гав... я плохо себя чувствую..."]
         }
     },
     "dragon": {
         "name": "Дракончик", "emoji": "🐉", "cost": 0, "premium": True,
+        "evolution": {1: "🥚", 2: "🐣", 3: "🐲", 5: "🐉", 10: "🔥"},
         "mood_messages": {
             "happy": ["Ррр! Ты великий воин!", "Моя чешуя сияет!", "Драконье спасибо!"],
             "sad": ["Ррр... я слабею...", "Мне нужна твоя сила...", "Дракон грустит..."],
-            "danger": ["Ррр! Я могу улететь навсегда!", "Моя ярость растёт!"]
+            "danger": ["💀 Я исчезаю...", "Ррр! Моя ярость растёт!"],
+            "excellent": ["😎 Я в отличной форме!", "🔥 Драконий огонь!"],
+            "sick": ["🤒 Я заболел... Мне нужно больше заботы!", "Ррр... моя чешуя тускнеет..."]
         }
     }
 }
@@ -40,34 +49,115 @@ PET_TYPES = {
 def get_pet(user_id: int):
     user = db.users.find_one({"user_id": user_id})
     if not user or "pet" not in user:
-        pet = {"type": "cat", "name": "Барсик", "hunger": 100, "mood": 100, "level": 1, "xp": 0}
+        pet = {
+            "type": "cat", "name": "Барсик", "hunger": 100, "mood": 100,
+            "level": 1, "xp": 0, "is_sick": False, "consecutive_done": 0
+        }
         db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}}, upsert=True)
         return pet
     return user["pet"]
 
-def update_pet_stats(user_id: int, hunger_delta: int = 0, mood_delta: int = 0):
+def update_pet_stats(user_id: int, hunger_delta: int = 0, mood_delta: int = 0, performed: bool = False):
     pet = get_pet(user_id)
     pet["hunger"] = max(0, min(200, pet["hunger"] + hunger_delta))
     pet["mood"] = max(0, min(200, pet["mood"] + mood_delta))
-    pet["xp"] += abs(hunger_delta) // 2
-    if pet["xp"] >= 100:
-        pet["level"] += 1
-        pet["xp"] -= 100
+
+    if pet["mood"] < 30:
+        pet["is_sick"] = True
+    else:
+        if performed:
+            pet["consecutive_done"] += 1
+            if pet["consecutive_done"] >= 3:
+                pet["is_sick"] = False
+                pet["consecutive_done"] = 0
+                pet["mood"] = max(pet["mood"], 50)
+        else:
+            pet["consecutive_done"] = 0
+
+    if not pet["is_sick"]:
+        pet["xp"] += abs(hunger_delta) // 2
+        if pet["xp"] >= 100:
+            pet["level"] += 1
+            pet["xp"] -= 100
+
     db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}})
     return pet
 
-def get_pet_message(user_id: int) -> str | None:
+def get_pet_message(user_id: int) -> tuple[str, str]:
     pet = get_pet(user_id)
     pet_type = pet["type"]
-    if pet["mood"] >= 100:
-        msg_list = PET_TYPES[pet_type]["mood_messages"]["happy"]
-    elif pet["mood"] >= 30:
-        msg_list = PET_TYPES[pet_type]["mood_messages"]["sad"]
-    else:
-        msg_list = PET_TYPES[pet_type]["mood_messages"]["danger"]
-    return f"{PET_TYPES[pet_type]['emoji']} {random.choice(msg_list)}"
+    mood = pet["mood"]
+    hunger = pet["hunger"]
+    is_sick = pet.get("is_sick", False)
 
-def change_pet(user_id: int, new_type: str, cost_xp: int = 0) -> bool:
+    if is_sick:
+        status_emoji = "🤒"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["sick"]
+    elif mood >= 150 and hunger >= 150:
+        status_emoji = "😎"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["excellent"]
+    elif mood >= 100 and hunger >= 100:
+        status_emoji = "😊"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["happy"]
+    elif mood >= 50 and hunger >= 50:
+        status_emoji = "😐"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["sad"]
+    elif mood >= 20:
+        status_emoji = "😢"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["sad"]
+    elif mood > 0:
+        status_emoji = "😰"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["danger"]
+    else:
+        status_emoji = "💀"
+        msg_list = PET_TYPES[pet_type]["mood_messages"]["danger"]
+
+    return status_emoji, f"{status_emoji} {random.choice(msg_list)}"
+
+def lose_level_if_inactive(user_id: int):
+    pet = get_pet(user_id)
+    last_done = db.agreements.find_one(
+        {"user_id": user_id, "is_done": True},
+        sort=[("done_at", -1)]
+    )
+    if last_done:
+        last_date = last_done["done_at"].date() if isinstance(last_done["done_at"], datetime) else last_done["done_at"].date()
+        days_since = (date.today() - last_date).days
+        if days_since >= 3 and pet["level"] > 1:
+            pet["level"] -= 1
+            db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}})
+            return True
+    return False
+
+def get_pet_ascii_art(pet_type: str, level: int, mood: int, is_sick: bool = False) -> str:
+    base_arts = {
+        "cat": ["  /\\_/\\  ", " ( o.o ) ", "  > ^ <  "],
+        "dog": ["  / \\__  ", " (    @\\___ ", " /         O ", "/   (_____ / "],
+        "dragon": ["      ,,,  ", "     (o o) ", "---ooO-(_)-Ooo---"],
+    }
+    if is_sick:
+        sad_arts = {
+            "cat": ["  /\\_/\\  ", " ( x.x ) ", "  > - <  "],
+            "dog": ["  / \\__  ", " (    @\\___ ", " /    o    O ", "/   (___) / "],
+            "dragon": ["      ,,,  ", "     (x x) ", "---ooO-(_)-Ooo---"],
+        }
+        art = sad_arts.get(pet_type, sad_arts["cat"])
+    elif mood < 50:
+        sad_arts = {
+            "cat": ["  /\\_/\\  ", " ( -.- ) ", "  > ^ <  "],
+            "dog": ["  / \\__  ", " (    @\\___ ", " /    -    O ", "/   (___) / "],
+            "dragon": ["      ,,,  ", "     (- -) ", "---ooO-(_)-Ooo---"],
+        }
+        art = sad_arts.get(pet_type, sad_arts["cat"])
+    else:
+        art = base_arts.get(pet_type, base_arts["cat"])
+    if level >= 10:
+        art.insert(0, "  ✦ ✦ ✦  ")
+    elif level >= 5:
+        art.insert(0, "  ★ ★ ★  ")
+    return "\n".join(art)
+
+def change_pet(user_id: int, new_type: str, cost_xp: int = 0, cost_coins: int = 0) -> bool:
     if new_type not in PET_TYPES:
         return False
     user = db.users.find_one({"user_id": user_id})
@@ -78,11 +168,20 @@ def change_pet(user_id: int, new_type: str, cost_xp: int = 0) -> bool:
         if current_xp < cost_xp:
             return False
         db.users.update_one({"user_id": user_id}, {"$inc": {"xp": -cost_xp}})
-    pet = {"type": new_type, "name": PET_TYPES[new_type]["name"], "hunger": 100, "mood": 100, "level": 1, "xp": 0}
+    if cost_coins > 0:
+        current_coins = user.get("coins", 0)
+        if current_coins < cost_coins:
+            return False
+        db.users.update_one({"user_id": user_id}, {"$inc": {"coins": -cost_coins}})
+    pet = {
+        "type": new_type, "name": PET_TYPES[new_type]["name"],
+        "hunger": 100, "mood": 100, "level": 1, "xp": 0,
+        "is_sick": False, "consecutive_done": 0
+    }
     db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}})
     return True
 
-# ---------- Магазин (цены в монетах) ----------
+# ---------- Магазин ----------
 SHOP_ITEMS = [
     {"id": "badge_ninja", "name": "Ниндзя продуктивности", "cost": 500, "type": "badge", "emoji": "🥷"},
     {"id": "badge_master", "name": "Мастер дисциплины", "cost": 1000, "type": "badge", "emoji": "🏅"},
@@ -125,8 +224,7 @@ def create_user(user_id: int, referrer_id: int = None):
     new_user = {
         "user_id": user_id, "is_premium": False, "premium_until": None,
         "ref_code": ref_code, "referrer_id": referrer_id, "xp": 0,
-        "coins": 0,  # <- новый счётчик монет
-        "freezes_available": 0, "pet": None, "inventory": []
+        "coins": 0, "freezes_available": 0, "pet": None, "inventory": []
     }
     db.users.insert_one(new_user)
     get_pet(user_id)
@@ -261,7 +359,7 @@ def mark_done(agreement_id: str, photo_file_id: str = None):
         xp_map = {0: 10, 1: 25, 2: 50}
         diff = agreement.get("difficulty", 0)
         add_xp(agreement["user_id"], xp_map.get(diff, 10))
-        add_coins(agreement["user_id"], 10)  # базовые монеты
+        add_coins(agreement["user_id"], 10)
 
 def delete_agreement(agreement_id: str):
     try:
@@ -349,7 +447,7 @@ def check_challenge_completion(challenge_id: str):
         if done > 0:
             completed.append(user_id)
             db.challenges.update_one({"_id": oid}, {"$addToSet": {"completed": user_id}})
-            add_coins(user_id, 100)  # бонус за выполнение челленджа
+            add_coins(user_id, 100)
     return completed
 
 def get_all_challenges_stats():
@@ -486,7 +584,7 @@ def check_achievements(user_id: int) -> list[str]:
         newly_awarded.append("novice")
     if streak >= 7 and award_achievement(user_id, "discipline"):
         newly_awarded.append("discipline")
-        add_coins(user_id, 50)  # бонус за стрик
+        add_coins(user_id, 50)
     if total_done >= 100 and award_achievement(user_id, "champion"):
         newly_awarded.append("champion")
     return newly_awarded
