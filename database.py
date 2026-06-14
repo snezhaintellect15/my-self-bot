@@ -83,7 +83,7 @@ def update_pet_stats(user_id: int, hunger_delta: int = 0, mood_delta: int = 0, p
     db.users.update_one({"user_id": user_id}, {"$set": {"pet": pet}})
     return pet
 
-def get_pet_message(user_id: int) -> tuple[str, str]:
+def get_pet_message(user_id: int):
     pet = get_pet(user_id)
     pet_type = pet["type"]
     mood = pet["mood"]
@@ -193,7 +193,7 @@ SHOP_ITEMS = [
 def get_shop_items():
     return SHOP_ITEMS
 
-def buy_item(user_id: int, item_id: str) -> tuple[bool, str]:
+def buy_item(user_id: int, item_id: str):
     item = next((i for i in SHOP_ITEMS if i["id"] == item_id), None)
     if not item:
         return False, "Товар не найден."
@@ -208,13 +208,22 @@ def buy_item(user_id: int, item_id: str) -> tuple[bool, str]:
     db.users.update_one({"user_id": user_id}, {"$inc": {"coins": -item["cost"]}, "$addToSet": {"inventory": item_id}})
     return True, f"Вы купили {item['emoji']} {item['name']}!"
 
-def get_inventory(user_id: int) -> list[str]:
+def get_inventory(user_id: int):
     user = db.users.find_one({"user_id": user_id})
     return user.get("inventory", []) if user else []
 
 # ---------- Пользователи ----------
 def init_db():
-    pass
+    db.users.create_index("user_id", unique=True)
+    db.users.create_index("ref_code")
+    db.agreements.create_index("user_id")
+    db.agreements.create_index("is_done")
+    db.categories.create_index("user_id")
+    # Создаем коллекцию для фидбека если её нет
+    if "feedback" not in db.list_collection_names():
+        db.create_collection("feedback")
+    if "polls" not in db.list_collection_names():
+        db.create_collection("polls")
 
 def create_user(user_id: int, referrer_id: int = None):
     user = db.users.find_one({"user_id": user_id})
@@ -224,7 +233,8 @@ def create_user(user_id: int, referrer_id: int = None):
     new_user = {
         "user_id": user_id, "is_premium": False, "premium_until": None,
         "ref_code": ref_code, "referrer_id": referrer_id, "xp": 0,
-        "coins": 0, "freezes_available": 0, "pet": None, "inventory": []
+        "coins": 0, "freezes_available": 0, "pet": None, "inventory": [],
+        "username": None, "created_at": datetime.utcnow()
     }
     db.users.insert_one(new_user)
     get_pet(user_id)
@@ -301,8 +311,17 @@ def get_categories(user_id: int):
 def get_category_count(user_id: int) -> int:
     return db.categories.count_documents({"user_id": user_id})
 
+def delete_category(user_id: int, category_id):
+    try:
+        oid = ObjectId(category_id)
+    except:
+        return False
+    db.categories.delete_one({"_id": oid, "user_id": user_id})
+    db.agreements.update_many({"user_id": user_id, "category_id": oid}, {"$set": {"category_id": None}})
+    return True
+
 # ---------- Обещания ----------
-def add_agreement(user_id: int, text: str, category_id: ObjectId = None, difficulty: int = 0):
+def add_agreement(user_id: int, text: str, category_id=None, difficulty: int = 0):
     doc = {
         "user_id": user_id, "text": text, "category_id": category_id,
         "created_at": datetime.utcnow(), "is_done": False, "done_at": None,
@@ -310,7 +329,7 @@ def add_agreement(user_id: int, text: str, category_id: ObjectId = None, difficu
     }
     db.agreements.insert_one(doc)
 
-def get_agreements(user_id: int, only_active: bool = False, only_done: bool = False):
+def get_agreements(user_id: int, only_active: bool = False, only_done: bool = False, limit: int = 50):
     filter = {"user_id": user_id}
     if only_active:
         filter["is_done"] = False
@@ -327,11 +346,12 @@ def get_agreements(user_id: int, only_active: bool = False, only_done: bool = Fa
         {"$addFields": {
             "category_name": {"$arrayElemAt": ["$category.name", 0]}
         }},
-        {"$sort": {"created_at": -1}}
+        {"$sort": {"created_at": -1}},
+        {"$limit": limit}
     ]
     return list(db.agreements.aggregate(pipeline))
 
-def get_agreement_by_id(agreement_id: str):
+def get_agreement_by_id(agreement_id):
     try:
         oid = ObjectId(agreement_id)
     except:
@@ -349,7 +369,7 @@ def mark_done(agreement_id: str, photo_file_id: str = None):
     try:
         oid = ObjectId(agreement_id)
     except:
-        return
+        return None
     update = {"is_done": True, "done_at": datetime.utcnow()}
     if photo_file_id:
         update["photo_file_id"] = photo_file_id
@@ -358,8 +378,12 @@ def mark_done(agreement_id: str, photo_file_id: str = None):
     if agreement:
         xp_map = {0: 10, 1: 25, 2: 50}
         diff = agreement.get("difficulty", 0)
-        add_xp(agreement["user_id"], xp_map.get(diff, 10))
-        add_coins(agreement["user_id"], 10)
+        xp_amount = xp_map.get(diff, 10)
+        coin_amount = 10
+        add_xp(agreement["user_id"], xp_amount)
+        add_coins(agreement["user_id"], coin_amount)
+        return {"xp": xp_amount, "coins": coin_amount, "text": agreement["text"]}
+    return None
 
 def delete_agreement(agreement_id: str):
     try:
@@ -383,7 +407,7 @@ def can_attach_photo(user_id: int) -> bool:
     return count_photos_today(user_id) < 1
 
 # ---------- Статистика по категориям ----------
-def get_stats_by_category(user_id: int) -> list[dict]:
+def get_stats_by_category(user_id: int):
     categories = get_categories(user_id)
     result = []
     for cat in categories:
@@ -402,7 +426,7 @@ def create_daily_challenge():
         return existing["_id"]
     challenge = {
         "title": "Ежедневный челлендж",
-        "description": "Выполни хотя бы одно обещание сегодня и не прерывай серию!",
+        "description": "Выполни хотя бы одно обещание сегодня!",
         "date": today,
         "participants": [],
         "completed": [],
@@ -433,10 +457,10 @@ def check_challenge_completion(challenge_id: str):
     try:
         oid = ObjectId(challenge_id)
     except:
-        return
+        return []
     challenge = db.challenges.find_one({"_id": oid})
     if not challenge:
-        return
+        return []
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     completed = []
     for user_id in challenge.get("participants", []):
@@ -455,7 +479,7 @@ def get_all_challenges_stats():
     return list(db.challenges.find({"date": {"$gte": week_ago}}).sort("date", -1))
 
 # ---------- Рефералы ----------
-def get_ref_code(user_id: int) -> str | None:
+def get_ref_code(user_id: int):
     user = db.users.find_one({"user_id": user_id})
     if not user:
         return None
@@ -468,7 +492,7 @@ def get_ref_code(user_id: int) -> str | None:
 def get_user_by_ref_code(ref_code: str):
     return db.users.find_one({"ref_code": ref_code})
 
-def get_referral_stats(user_id: int) -> dict:
+def get_referral_stats(user_id: int):
     total = db.users.count_documents({"referrer_id": user_id})
     active = len([
         u for u in db.users.find({"referrer_id": user_id})
@@ -487,11 +511,11 @@ def set_reminder(user_id: int, time_str: str):
 def delete_reminder(user_id: int):
     db.reminders.delete_one({"user_id": user_id})
 
-def get_reminder(user_id: int) -> str | None:
+def get_reminder(user_id: int):
     doc = db.reminders.find_one({"user_id": user_id})
     return doc.get("remind_time") if doc else None
 
-def get_users_with_reminders() -> list[tuple[int, str]]:
+def get_users_with_reminders():
     return [(r["user_id"], r["remind_time"]) for r in db.reminders.find()]
 
 # ---------- Сводки ----------
@@ -505,15 +529,15 @@ def set_summary_time(user_id: int, time_str: str):
 def delete_summary_time(user_id: int):
     db.daily_summary.delete_one({"user_id": user_id})
 
-def get_summary_time(user_id: int) -> str | None:
+def get_summary_time(user_id: int):
     doc = db.daily_summary.find_one({"user_id": user_id})
     return doc.get("summary_time") if doc else None
 
-def get_users_with_summary() -> list[tuple[int, str]]:
+def get_users_with_summary():
     return [(s["user_id"], s["summary_time"]) for s in db.daily_summary.find()]
 
 # ---------- Статистика ----------
-def get_stats(user_id: int) -> dict:
+def get_stats(user_id: int):
     total = db.agreements.count_documents({"user_id": user_id})
     done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done / total * 100, 1) if total > 0 else 0.0
@@ -562,7 +586,7 @@ ACHIEVEMENTS = {
     "champion": ("👑 Чемпион", "Выполнить 100 обещаний"),
 }
 
-def get_user_achievements(user_id: int) -> list[str]:
+def get_user_achievements(user_id: int):
     doc = db.achievements.find_one({"user_id": user_id})
     return doc.get("keys", []) if doc else []
 
@@ -574,12 +598,16 @@ def award_achievement(user_id: int, key: str) -> bool:
     )
     return result.modified_count > 0
 
-def check_achievements(user_id: int) -> list[str]:
+def check_achievements(user_id: int):
     newly_awarded = []
     total_created = db.agreements.count_documents({"user_id": user_id})
     total_done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     stats = get_stats(user_id)
     streak = stats["streak"]
+    
+    if streak in [3, 7, 14, 21, 30, 50, 100]:
+        newly_awarded.append(f"streak_{streak}")
+    
     if total_created >= 10 and award_achievement(user_id, "novice"):
         newly_awarded.append("novice")
     if streak >= 7 and award_achievement(user_id, "discipline"):
@@ -587,13 +615,15 @@ def check_achievements(user_id: int) -> list[str]:
         add_coins(user_id, 50)
     if total_done >= 100 and award_achievement(user_id, "champion"):
         newly_awarded.append("champion")
+        add_coins(user_id, 300)
+    
     return newly_awarded
 
 # ---------- Запланированные напоминания ----------
 def count_scheduled_reminders(user_id: int) -> int:
     return db.scheduled_reminders.count_documents({"user_id": user_id})
 
-def create_scheduled_reminder(user_id: int, agreement_id: ObjectId, remind_date: date, remind_time: str,
+def create_scheduled_reminder(user_id: int, agreement_id, remind_date, remind_time,
                               is_recurring: bool = False, recurring_day: int = None):
     doc = {
         "user_id": user_id,
@@ -606,7 +636,7 @@ def create_scheduled_reminder(user_id: int, agreement_id: ObjectId, remind_date:
     }
     db.scheduled_reminders.insert_one(doc)
 
-def get_pending_reminders_for_now(now_date: date, now_time: str) -> list[tuple]:
+def get_pending_reminders_for_now(now_date, now_time):
     results = []
     one_time = db.scheduled_reminders.find({
         "remind_date": now_date.isoformat(),
@@ -637,7 +667,7 @@ def delete_scheduled_reminder(reminder_id: str):
     db.scheduled_reminders.delete_one({"_id": oid})
 
 # ---------- Админ-статистика ----------
-def get_admin_stats() -> dict:
+def get_admin_stats():
     total_users = db.users.count_documents({})
     total_agreements = db.agreements.count_documents({})
     premium_users = db.users.count_documents({"is_premium": True})
@@ -651,3 +681,27 @@ def get_admin_stats() -> dict:
         "premium_users": premium_users, "total_agreements": total_agreements,
         "total_referrals": total_referrals
     }
+
+# ---------- Фидбек ----------
+def save_feedback(user_id: int, username: str, text: str):
+    db.feedback.insert_one({
+        "user_id": user_id,
+        "username": username,
+        "text": text,
+        "created_at": datetime.utcnow()
+    })
+
+def get_recent_feedback(limit: int = 20):
+    return list(db.feedback.find().sort("created_at", -1).limit(limit))
+
+def has_poll_today(user_id: int) -> bool:
+    today = datetime.utcnow().date()
+    last_poll = db.polls.find_one({"user_id": user_id, "date": today.isoformat()})
+    return last_poll is not None
+
+def save_poll_response(user_id: int, answer: str):
+    db.polls.insert_one({
+        "user_id": user_id,
+        "answer": answer,
+        "date": datetime.utcnow().date().isoformat()
+    })

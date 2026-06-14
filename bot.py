@@ -1,14 +1,16 @@
 import logging
 import os
+import re
+import random
 from datetime import datetime, timedelta, date
-from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, JobQueue
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, PreCheckoutQueryHandler
 from database import (init_db, create_user, is_premium, set_premium,
                       add_agreement, get_agreements, get_agreement_by_id,
                       mark_done, delete_agreement, update_agreement,
-                      create_category, get_categories, get_category_count,
+                      create_category, get_categories, get_category_count, delete_category,
                       set_reminder, delete_reminder, get_reminder, get_users_with_reminders,
                       get_stats, get_agreements_export,
                       check_achievements, get_user_achievements, ACHIEVEMENTS,
@@ -24,10 +26,10 @@ from database import (init_db, create_user, is_premium, set_premium,
                       create_daily_challenge, get_active_challenges, join_challenge,
                       check_challenge_completion, get_all_challenges_stats,
                       can_attach_photo, count_photos_today, get_stats_by_category,
+                      save_feedback, get_recent_feedback, has_poll_today, save_poll_response,
                       db)
 from bson.objectid import ObjectId
 from fpdf import FPDF
-import fpdf
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,7 +38,8 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = "MyPromiseTrackerBot"  # замени на свой username бота (без @)
+BOT_USERNAME = "MyPromiseTrackerBot"  # ЗАМЕНИТЕ НА ВАШ USERNAME
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 MSK_OFFSET = timedelta(hours=3)
 
 # ---------- Flask ----------
@@ -52,10 +55,230 @@ def run_flask():
 
 def keep_alive():
     Thread(target=run_flask).start()
-# -----------------------
+
+# ---------- Мотивационные сообщения ----------
+MOTIVATIONAL_MESSAGES = {
+    "daily_summary": [
+        "🌟 Ты сегодня супер-звезда! Так держать!",
+        "💪 Каждый выполненный шаг приближает тебя к цели!",
+        "🎯 Ты на верном пути! Продолжай в том же духе!",
+        "🔥 Сегодня ты настоящий воин продуктивности!",
+        "⭐ Даже маленький шаг — это прогресс. Ты молодец!",
+        "🌈 Твоя дисциплина вдохновляет!",
+        "🏆 Ещё один день — ещё одна победа над прокрастинацией!",
+        "💎 Качество твоих дел растёт с каждым днём!",
+    ],
+    "task_completed": [
+        "✅ Отлично! Ещё один шаг к цели!",
+        "🎉 Ура! Задача выполнена!",
+        "💪 Сила воли прокачана!",
+        "🏅 Ты на шаг ближе к новому достижению!",
+        "🔥 Ещё одна задача покорена!",
+        "⭐ Твоя продуктивность зашкаливает!",
+        "🌈 Молодец! Так держать!",
+        "🎯 Точное попадание в цель!",
+    ],
+    "streak_milestones": {
+        3: "🎉 3 дня подряд! +20 монет!",
+        7: "🔥 7 дней серии! +50 монет! 🎁",
+        14: "💪 Две недели дисциплины! +100 монет! 🏆",
+        21: "🌈 21 день! +150 монет! 🎯",
+        30: "👑 МЕСЯЦ серии! +300 монет! ⭐",
+        50: "🦁 50 дней подряд! +500 монет! 🔥",
+        100: "🏆🏆🏆 100 ДНЕЙ! +1000 монет! 👑",
+    },
+    "morning_greetings": [
+        "☀️ Доброе утро! Какой подвиг совершишь сегодня?",
+        "🌅 Новый день — новые победы!",
+        "⭐ Вставай и сияй!",
+        "💪 Утро — время планировать дела!",
+    ],
+    "evening_encouragement": [
+        "🌙 Отличный день! Отдыхай!",
+        "💤 Завтра будет новый день!",
+        "⭐ Не переживай, если что-то не успел(а)!",
+        "📖 Каждый день — страница успеха!",
+    ],
+    "procrastination_alert": [
+        "⚠️ Внимание! Есть невыполненные обещания!",
+        "⏰ Начни с малого шага прямо сейчас!",
+        "🎯 Лучше сделать плохо, чем не сделать совсем!",
+        "💪 Просто сделай первый шаг!",
+    ],
+    "perfect_day": [
+        "🏆 ИДЕАЛЬНЫЙ ДЕНЬ! Все обещания выполнены!",
+        "👑 100% выполнение! Ты бог продуктивности!",
+        "⭐ Сегодня ты показал(а) высший пилотаж!",
+        "💎 Идеальный день в копилку успехов!",
+    ],
+    "coins_earned": {
+        10: "🪙 +10 монет!",
+        20: "💰 +20 монет!",
+        50: "💎 Ого! +50 монет!",
+        100: "🎉 ВАУ! +100 монет!",
+    }
+}
+
+def get_motivation_message(category: str, **kwargs) -> str:
+    if category in MOTIVATIONAL_MESSAGES:
+        if isinstance(MOTIVATIONAL_MESSAGES[category], dict):
+            key = kwargs.get('key')
+            if key and key in MOTIVATIONAL_MESSAGES[category]:
+                return MOTIVATIONAL_MESSAGES[category][key]
+            return ""
+        else:
+            return random.choice(MOTIVATIONAL_MESSAGES[category])
+    return ""
+
+def check_streak_milestone(streak: int) -> str:
+    milestones = MOTIVATIONAL_MESSAGES["streak_milestones"]
+    if streak in milestones:
+        return milestones[streak]
+    return ""
+
+def get_coins_message(amount: int) -> str:
+    for threshold, message in MOTIVATIONAL_MESSAGES["coins_earned"].items():
+        if amount >= threshold:
+            return message
+    return f"🪙 +{amount} монет!"
+
+# ---------- NLP парсер ----------
+DAYS_RU = {
+    'понедельник': 0, 'пн': 0, 'понедельник': 0,
+    'вторник': 1, 'вт': 1,
+    'среда': 2, 'ср': 2,
+    'четверг': 3, 'чт': 3,
+    'пятница': 4, 'пт': 4,
+    'суббота': 5, 'сб': 5,
+    'воскресенье': 6, 'вс': 6,
+}
+
+MONTHS_RU = {
+    'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
+    'мая': 5, 'июня': 6, 'июля': 7, 'августа': 8,
+    'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
+}
+
+def parse_natural_language(text: str):
+    text_lower = text.lower()
+    today = date.today()
+    remind_date = today
+    remind_time = "09:00"
+    task_text = text
+    is_recurring = False
+    recurring_day = None
+    
+    time_patterns = [
+        r'(\d{1,2}):(\d{2})',
+        r'в (\d{1,2})\s*часов?\s*(\d{1,2})?\s*минут?',
+        r'в (\d{1,2})(?:\s*часов?)?',
+        r'(\d{1,2})\s*утра',
+        r'(\d{1,2})\s*дня',
+        r'(\d{1,2})\s*вечера',
+    ]
+    
+    for pattern in time_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            if ':' in pattern:
+                hour = int(match.group(1))
+                minute = int(match.group(2))
+            elif 'утра' in pattern:
+                hour = int(match.group(1))
+                minute = 0
+                if hour == 12:
+                    hour = 0
+            elif 'дня' in pattern:
+                hour = int(match.group(1))
+                minute = 0
+                if hour < 12:
+                    hour += 12
+            elif 'вечера' in pattern:
+                hour = int(match.group(1))
+                minute = 0
+                if hour < 12:
+                    hour += 12
+            else:
+                hour = int(match.group(1))
+                minute = int(match.group(2)) if match.group(2) else 0
+            remind_time = f"{hour:02d}:{minute:02d}"
+            break
+    
+    for day_name, day_num in DAYS_RU.items():
+        if day_name in text_lower:
+            if re.search(r'(каждый|каждую)\s+' + day_name, text_lower):
+                is_recurring = True
+                recurring_day = day_num
+                task_text = re.sub(r'(каждый|каждую)\s+' + day_name + r'\s*', '', text, flags=re.IGNORECASE)
+    
+    if 'послезавтра' in text_lower:
+        remind_date = today + timedelta(days=2)
+        task_text = re.sub(r'послезавтра\s*', '', text, flags=re.IGNORECASE)
+    elif 'завтра' in text_lower:
+        remind_date = today + timedelta(days=1)
+        task_text = re.sub(r'завтра\s*', '', text, flags=re.IGNORECASE)
+    elif 'сегодня' in text_lower:
+        remind_date = today
+        task_text = re.sub(r'сегодня\s*', '', text, flags=re.IGNORECASE)
+    
+    date_match = re.search(r'(\d{1,2})\s+(\w+)', text_lower)
+    if date_match and not is_recurring:
+        day = int(date_match.group(1))
+        month_name = date_match.group(2)
+        if month_name in MONTHS_RU:
+            month = MONTHS_RU[month_name]
+            year = today.year
+            try:
+                remind_date = date(year, month, day)
+                if remind_date < today:
+                    remind_date = date(year + 1, month, day)
+                task_text = re.sub(r'\d{1,2}\s+\w+\s*', '', text, flags=re.IGNORECASE)
+            except:
+                pass
+    
+    if not remind_date and not is_recurring:
+        for day_name, day_num in DAYS_RU.items():
+            if day_name in text_lower:
+                days_ahead = day_num - today.weekday()
+                if days_ahead <= 0:
+                    days_ahead += 7
+                remind_date = today + timedelta(days=days_ahead)
+                task_text = re.sub(day_name + r'\s*', '', text, flags=re.IGNORECASE)
+                break
+    
+    markers = ['напомни', 'сделать', 'купить', 'позвонить', 'напомнить', 'в ']
+    for marker in markers:
+        task_text = re.sub(r'^' + marker + r'\s*', '', task_text, flags=re.IGNORECASE)
+    
+    task_text = re.sub(r'\s+', ' ', task_text).strip()
+    task_text = re.sub(r'\d{1,2}:\d{2}', '', task_text)
+    task_text = re.sub(r'\d{1,2}\s*(часов|утра|дня|вечера)', '', task_text)
+    task_text = re.sub(r'\s+', ' ', task_text).strip()
+    
+    if not task_text:
+        task_text = "Напоминание"
+    
+    return remind_date, remind_time, task_text, is_recurring, recurring_day
+
+# ---------- Вспомогательные функции ----------
+def split_message(text: str, max_len: int = 4000):
+    if len(text) <= max_len:
+        return [text]
+    parts = []
+    lines = text.split('\n')
+    current_part = ""
+    for line in lines:
+        if len(current_part) + len(line) + 1 <= max_len:
+            current_part += line + '\n'
+        else:
+            parts.append(current_part)
+            current_part = line + '\n'
+    if current_part:
+        parts.append(current_part)
+    return parts
 
 def build_list_message(user_id: int, only_active: bool = False, only_done: bool = False):
-    agreements = get_agreements(user_id, only_active=only_active, only_done=only_done)
+    agreements = get_agreements(user_id, only_active=only_active, only_done=only_done, limit=100)
     if not agreements:
         if only_active:
             return "У тебя пока нет активных обещаний.", None
@@ -83,7 +306,13 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
         else:
             groups.setdefault(cat_name, []).append((agr_id, display_text, is_done))
 
-    response = "📝 **Активные обещания:**\n\n" if only_active else "📜 **История выполненных:**\n\n"
+    if only_active:
+        response = "📝 **Активные обещания:**\n\n"
+    elif only_done:
+        response = "📜 **История выполненных:**\n\n"
+    else:
+        response = "📋 **Все обещания:**\n\n"
+    
     keyboard = []
 
     if no_cat:
@@ -91,12 +320,10 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
         for agr_id, text, is_done in no_cat:
             status = "⬜" if not is_done else "✅"
             response += f"  {status} {text}\n"
-            if not is_done:
+            if not is_done and only_active:
                 keyboard.append([
-                    InlineKeyboardButton(f"✅ Вып. ({text[:15]})", callback_data=f"done_{agr_id}"),
+                    InlineKeyboardButton(f"✅ Вып.", callback_data=f"done_{agr_id}"),
                     InlineKeyboardButton(f"🗑 Удл.", callback_data=f"delete_{agr_id}"),
-                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}"),
-                    InlineKeyboardButton(f"🔔 Напомнить", callback_data=f"remindat_{agr_id}")
                 ])
 
     for cat, items in groups.items():
@@ -104,16 +331,61 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
         for agr_id, text, is_done in items:
             status = "⬜" if not is_done else "✅"
             response += f"  {status} {text}\n"
-            if not is_done:
+            if not is_done and only_active:
                 keyboard.append([
-                    InlineKeyboardButton(f"✅ Вып. ({text[:15]})", callback_data=f"done_{agr_id}"),
+                    InlineKeyboardButton(f"✅ Вып.", callback_data=f"done_{agr_id}"),
                     InlineKeyboardButton(f"🗑 Удл.", callback_data=f"delete_{agr_id}"),
-                    InlineKeyboardButton(f"✏️ Изм.", callback_data=f"edit_{agr_id}"),
-                    InlineKeyboardButton(f"🔔 Напомнить", callback_data=f"remindat_{agr_id}")
                 ])
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     return response, reply_markup
+
+async def build_daily_summary(user_id: int) -> str:
+    today = date.today()
+    done_today = db.agreements.count_documents({
+        "user_id": user_id,
+        "is_done": True,
+        "done_at": {"$gte": datetime(today.year, today.month, today.day)}
+    })
+    total = db.agreements.count_documents({"user_id": user_id})
+    done_total = db.agreements.count_documents({"user_id": user_id, "is_done": True})
+    percent = round(done_total / total * 100, 1) if total > 0 else 0.0
+    active = db.agreements.count_documents({"user_id": user_id, "is_done": False})
+    
+    message = "📋 **Ежедневная сводка**\n\n"
+    
+    if done_today > 0:
+        message += f"✅ Сегодня выполнено: {done_today} обещаний\n"
+    else:
+        message += "😴 Сегодня пока нет выполненных обещаний\n"
+    
+    message += f"📊 Активных обещаний: {active}\n"
+    message += f"🏆 Общий прогресс: {done_total}/{total} ({percent}%)\n\n"
+    
+    if percent == 100 and total > 0:
+        message += get_motivation_message("perfect_day") + "\n\n"
+    elif active == 0 and total > 0:
+        message += "🎉 Все обещания выполнены! Ты герой!\n\n"
+    elif active > 0 and done_today == 0:
+        message += get_motivation_message("procrastination_alert") + "\n\n"
+    else:
+        message += get_motivation_message("daily_summary") + "\n"
+    
+    tips = [
+        "💡 Совет: Начни с самой маленькой задачи!",
+        "🎯 Совет: Разбей большие задачи на маленькие шаги.",
+        "⏰ Совет: Используй технику Pomodoro!",
+        "📝 Совет: Записывай даже маленькие победы!",
+        "🌟 Совет: Похвали себя за каждое выполненное обещание!",
+    ]
+    message += "\n" + random.choice(tips)
+    
+    return message
+
+# ---------- Команды бота ----------
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ Операция отменена.")
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -126,12 +398,14 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("👥 Рефералы"), KeyboardButton("❓ Помощь")],
         [KeyboardButton("🐾 Питомец"), KeyboardButton("🛒 Магазин")],
         [KeyboardButton("🛡 Заморозка"), KeyboardButton("🌍 Челленджи")],
-        [KeyboardButton("🪙 Баланс")]
+        [KeyboardButton("🪙 Баланс"), KeyboardButton("🤖 Напомнить")],
+        [KeyboardButton("💬 Фидбек"), KeyboardButton("❌ Отмена")]
     ]
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username
     args = context.args
 
     referrer_id = None
@@ -142,32 +416,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_id = referrer["user_id"]
 
     create_user(user_id, referrer_id)
+    
+    # Обновляем username в базе
+    db.users.update_one({"user_id": user_id}, {"$set": {"username": username}})
 
     xp = get_xp(user_id)
     level = xp // 100 + 1
     coins = get_coins(user_id)
+    
     welcome_text = (
-        f"👋 Привет! Я твой персональный трекер обещаний.\n\n"
-        f"✨ Со мной ты можешь:\n"
+        f"👋 Привет, {username or 'друг'}! Я твой персональный трекер обещаний.\n\n"
+        f"✨ **Что я умею:**\n"
         f"• Записывать обещания и цели\n"
-        f"• Выбирать уровень сложности (🌱 Легко, ⚡️ Средне, 🔥 Хардкор)\n"
-        f"• Получать напоминания и ежедневные сводки\n"
-        f"• Отслеживать прогресс и достижения\n"
-        f"• Делать фото-подтверждение выполненных обещаний\n\n"
+        f"• Понимать естественный язык (просто пиши как человеку)\n"
+        f"• Дарить питомца, который растёт с тобой\n"
+        f"• Отслеживать прогресс и выдавать достижения\n\n"
         f"📊 Твой уровень: {level} (XP: {xp})\n"
-        f"🪙 Монеты: {coins}\n"
-        f"📌 <b>Главное меню:</b> /menu\n"
-        f"👥 Пригласи друга и получи <b>7 дней премиума</b> — /invite\n"
-        f"ℹ️ Все команды: /help"
+        f"🪙 Монеты: {coins}\n\n"
+        f"📌 Главное меню: /menu\n"
+        f"👥 Пригласи друга: /invite\n\n"
+        f"🤖 **Попробуй умное напоминание:**\n"
+        f"`/remindme Напомни завтра в 10 утра купить хлеб`\n\n"
+        f"💬 Если есть идеи или проблемы — напиши /feedback"
     )
-    await update.message.reply_text(welcome_text, parse_mode="HTML")
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
     if referrer_id:
         await update.message.reply_text("🎁 Вы перешли по реферальной ссылке! Вам начислено 3 дня премиума.")
         try:
-            await context.application.bot.send_message(
+            await context.bot.send_message(
                 chat_id=referrer_id,
                 text="🎉 По вашей реферальной ссылке зарегистрировался новый пользователь! Вы получили 7 дней премиума."
+            )
+        except:
+            pass
+
+    # Уведомление админу о новом пользователе
+    if ADMIN_ID:
+        user_count = db.users.count_documents({})
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🆕 **Новый пользователь!**\n\n"
+                     f"👤 @{username}\n"
+                     f"🆔 ID: `{user_id}`\n"
+                     f"📊 Всего пользователей: {user_count}\n"
+                     f"👥 Реферал: {'да' if referrer_id else 'нет'}",
+                parse_mode="Markdown"
             )
         except:
             pass
@@ -186,9 +481,10 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         "👥 **Реферальная программа**\n\n"
         f"Ваша ссылка:\n`{ref_link}`\n\n"
-        "Приглашайте друзей и получайте бонусы!\n"
-        "• За каждого приглашённого — **7 дней премиума**.\n"
-        "• Приглашённый получает **3 дня премиума**.\n\n"
+        "**Как получить премиум БЕСПЛАТНО:**\n"
+        "• Пригласи 1 друга → 7 дней премиума\n"
+        "• Пригласи 5 друзей → 1 месяц премиума\n"
+        "• Пригласи 20 друзей → ПРЕМИУМ НАВСЕГДА!\n\n"
         f"📊 **Ваша статистика:**\n"
         f"• Приглашено всего: {stats['total']}\n"
         f"• Активных: {stats['active']}"
@@ -196,32 +492,74 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📚 **Справка по командам**\n\n"
+        "**Основные:**\n"
+        "/start — Запустить бота\n"
+        "/menu — Главное меню\n"
+        "/add — Быстро добавить обещание\n"
+        "/list — Активные обещания\n"
+        "/history — Выполненные обещания\n\n"
+        "**Статистика:**\n"
+        "/stats — Твоя статистика\n"
+        "/achievements — Достижения\n"
+        "/export — Экспорт данных\n\n"
+        "**Напоминания:**\n"
+        "/remindme — Умное напоминание (понимает язык!)\n"
+        "/remind ЧЧ:ММ — Ежедневное напоминание\n"
+        "/setsummary ЧЧ:ММ — Время сводки\n\n"
+        "**Игровые:**\n"
+        "/pet — Питомец\n"
+        "/shop — Магазин\n"
+        "/challenges — Челленджи\n"
+        "/balance — Баланс монет\n\n"
+        "**Другое:**\n"
+        "/invite — Реферальная ссылка\n"
+        "/feedback — Написать идею/проблему\n"
+        "/premium — Премиум-доступ\n"
+        "/cancel — Отменить операцию"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "без юзернейма"
+    
+    if not context.args:
+        await update.message.reply_text(
+            "💬 **Поделись идеей или проблемой**\n\n"
+            "Напиши /feedback и свой текст\n"
+            "Пример: `/feedback Хочу тёмную тему!`\n\n"
+            "Лучшие идеи получат 🎁 100 монет!\n"
+            "Спасибо, что помогаешь улучшать бота! 🙏",
+            parse_mode="Markdown"
+        )
+        return
+    
+    feedback_text = " ".join(context.args)
+    
+    save_feedback(user_id, username, feedback_text)
+    add_coins(user_id, 10)
+    
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"📝 **Новый фидбек!**\n\n"
+                     f"От: @{username}\n"
+                     f"ID: `{user_id}`\n"
+                     f"Текст: {feedback_text}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+    
     await update.message.reply_text(
-        "/add — быстро добавить обещание без категории\n"
-        "/list — показать активные обещания\n"
-        "/history — показать выполненные обещания\n"
-        "/stats — твоя статистика и достижения\n"
-        "/achievements — список достижений\n"
-        "/export — экспорт данных (премиум — PDF-файл с графиками)\n"
-        "/summary — сводка за сегодня\n"
-        "/setsummary ЧЧ:ММ — установить время ежедневной сводки\n"
-        "/setsummary off — отключить ежедневную сводку\n"
-        "/remind ЧЧ:ММ — ежедневное напоминание о невыполненных\n"
-        "/remind off — отключить ежедневное напоминание\n"
-        "/remindat ДД.ММ ЧЧ:ММ [текст] — напомнить о конкретном обещании в дату/время\n"
-        "/invite — реферальная ссылка и статистика\n"
-        "/pet — твой питомец\n"
-        "/changepet — сменить питомца\n"
-        "/shop — магазин достижений\n"
-        "/freeze — заморозить день (премиум)\n"
-        "/challenges — активные челленджи\n"
-        "/balance — твой баланс монет\n"
-        "/premium — инфо о премиуме и переключение (on/off)"
+        "🙏 Спасибо за обратную связь! Я передал её разработчику.\n"
+        "🎁 За полезные идеи начисляем +10 монет!"
     )
 
-# --- Добавление обещания (выбор сложности для любого текста) ---
 async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     if not context.args:
         await update.message.reply_text("Напиши текст после /add. Пример: `/add Прочитать книгу`")
         return
@@ -251,18 +589,23 @@ async def difficulty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{text}\"")
         new_achievements = check_achievements(user_id)
         for key in new_achievements:
-            name, desc = ACHIEVEMENTS[key]
-            await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
+            if key.startswith("streak_"):
+                continue
+            name, desc = ACHIEVEMENTS.get(key, (key, ""))
+            if name:
+                await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!", parse_mode="Markdown")
 
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_list_message(user_id, only_active=True)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    for part in split_message(text):
+        await update.message.reply_text(part, parse_mode="Markdown", reply_markup=markup if part == text else None)
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text, markup = build_list_message(user_id, only_done=True)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    text, _ = build_list_message(user_id, only_done=True)
+    for part in split_message(text):
+        await update.message.reply_text(part, parse_mode="Markdown")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -274,7 +617,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 **Твоя статистика:**\n\n"
         f"• Всего обещаний: {stats['total']}\n"
         f"• Выполнено: {stats['done']} ({stats['percent']}%)\n"
-        f"• Дней подряд с выполненными обещаниями: {stats['streak']}\n"
+        f"• Дней подряд: {stats['streak']}\n"
         f"• Уровень: {level} (XP: {xp})\n"
         f"• Монеты: {coins} 🪙\n\n"
     )
@@ -283,23 +626,22 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "📂 **По категориям:**\n"
         for cat in cat_stats:
             message += f"  {cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)\n"
-    else:
-        message += "Создайте категории, чтобы увидеть статистику по ним.\n"
 
     if stats['streak'] >= 30:
         message += "\n🔥 Легендарная серия! Ты невероятен!"
     elif stats['streak'] >= 7:
         message += "\n🌟 Отличная серия! Продолжай в том же духе."
-    elif stats['streak'] == 0:
-        message += "\n😴 Сегодня начни новую серию!"
 
     achieved = get_user_achievements(user_id)
     if achieved:
         message += "\n\n🏆 **Твои достижения:**\n"
         for key in achieved:
-            name, desc = ACHIEVEMENTS[key]
-            message += f"  {name} — {desc}\n"
-    await update.message.reply_text(message, parse_mode="Markdown")
+            if key in ACHIEVEMENTS:
+                name, desc = ACHIEVEMENTS[key]
+                message += f"  {name} — {desc}\n"
+    
+    for part in split_message(message):
+        await update.message.reply_text(part, parse_mode="Markdown")
 
 async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -312,81 +654,48 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
         message += "\nПока нет ни одного достижения. Начни с создания 10 обещаний!"
     await update.message.reply_text(message, parse_mode="Markdown")
 
-# --- Экспорт (с корректным шрифтом DejaVu Sans) ---
-def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list) -> bytes:
-    # Используем DejaVu Sans, который гарантированно есть в fpdf2[fonts]
-    font_path = os.path.join(os.path.dirname(fpdf.__file__), "fonts", "DejaVuSans.ttf")
-    if not os.path.exists(font_path):
-        font_path = None
+def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
     pdf = FPDF()
-    if font_path:
-        pdf.add_font("DejaVu", fname=font_path)
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("DejaVu", size=16)
-    pdf.cell(0, 10, "PromiseTracker Report", new_x="LMARGIN", new_y="NEXT", align="C")
+    
+    try:
+        pdf.set_font("Helvetica", size=12)
+    except:
+        pass
+    
+    pdf.cell(0, 10, "Promise Tracker Report", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
-
-    pdf.set_font("DejaVu", size=10)
-    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
-
-    pdf.set_font("DejaVu", size=14)
+    
+    pdf.set_font_size(14)
     pdf.cell(0, 10, "Overall Statistics", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("DejaVu", size=12)
+    pdf.set_font_size(12)
     pdf.cell(0, 8, f"Total promises: {stats['total']}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Completed: {stats['done']} ({stats['percent']}%)", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Current streak: {stats['streak']} days", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
-
-    bar_width = 100
-    percent = stats['percent']
-    pdf.set_font("DejaVu", size=10)
-    pdf.cell(0, 5, "Progress:", new_x="LMARGIN", new_y="NEXT")
-    x = pdf.get_x()
-    y = pdf.get_y()
-    pdf.rect(x, y, bar_width, 5, style="D")
-    filled = int(bar_width * percent / 100)
-    if filled > 0:
-        pdf.rect(x, y, filled, 5, style="F")
-    pdf.ln(8)
-
+    
     if cat_stats:
-        pdf.set_font("DejaVu", size=14)
+        pdf.set_font_size(14)
         pdf.cell(0, 10, "By Category", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("DejaVu", size=12)
+        pdf.set_font_size(12)
         for cat in cat_stats:
             pdf.cell(0, 8, f"{cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(5)
-
-    pdf.set_font("DejaVu", size=14)
+    
+    pdf.set_font_size(14)
     pdf.cell(0, 10, "All Promises", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("DejaVu", size=10)
-    col_widths = [15, 90, 40, 40]
-    headers = ["Status", "Promise", "Category", "Date"]
-    for i, header in enumerate(headers):
-        pdf.cell(col_widths[i], 8, header, border=1)
-    pdf.ln()
-    for agr in agreements:
-        status = "V" if agr["is_done"] else "X"
-        text = agr["text"][:40] + ("..." if len(agr["text"]) > 40 else "")
+    pdf.set_font_size(10)
+    
+    for agr in agreements[:50]:
+        status = "[DONE]" if agr["is_done"] else "[PENDING]"
         cat = agr.get("category_name", "") or "None"
-        created = agr["created_at"].strftime("%Y-%m-%d") if isinstance(agr["created_at"], datetime) else agr["created_at"]
-        pdf.cell(col_widths[0], 6, status, border=1)
-        pdf.cell(col_widths[1], 6, text, border=1)
-        pdf.cell(col_widths[2], 6, cat[:15], border=1)
-        pdf.cell(col_widths[3], 6, created, border=1)
-        pdf.ln()
-
-    pdf.ln(5)
-    pdf.set_font("DejaVu", size=14)
-    pdf.cell(0, 10, "Progress Chart (ASCII)", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("DejaVu", size=8)
-    max_len = 50
-    done_len = int(max_len * percent / 100) if stats['total'] > 0 else 0
-    chart_line = "Done: [" + "#" * done_len + "-" * (max_len - done_len) + f"] {percent}%"
-    pdf.cell(0, 5, chart_line, new_x="LMARGIN", new_y="NEXT")
-
+        created = agr["created_at"].strftime("%Y-%m-%d") if isinstance(agr["created_at"], datetime) else str(agr["created_at"])
+        text = agr["text"][:60] + ("..." if len(agr["text"]) > 60 else "")
+        pdf.cell(0, 6, f"{status} {text} [{cat}] {created}", new_x="LMARGIN", new_y="NEXT")
+    
     return pdf.output()
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,61 +706,89 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stats = get_stats(user_id)
-    cat_stats = get_stats_by_category(user_id)
-
+    
     text = "📤 **Экспорт обещаний**\n\n"
-    for agr in data:
+    for agr in data[:30]:
         status = "✅" if agr["is_done"] else "⬜"
-        cat_str = f"[{agr.get('category_name', '')}:] " if agr.get("category_name") else ""
+        cat_str = f"[{agr.get('category_name', '')}] " if agr.get("category_name") else ""
         created_dt = agr["created_at"]
-        created_msk = created_dt + MSK_OFFSET if isinstance(created_dt, datetime) else created_dt
-        created_formatted = created_msk.strftime("%Y-%m-%d %H:%M") if isinstance(created_msk, datetime) else str(created_msk)
-        line = f"{status} {cat_str}{agr['text']} (создано: {created_formatted}"
-        if agr["is_done"] and agr.get("done_at"):
-            done_dt = agr["done_at"]
-            done_msk = done_dt + MSK_OFFSET if isinstance(done_dt, datetime) else done_dt
-            done_formatted = done_msk.strftime("%Y-%m-%d %H:%M") if isinstance(done_msk, datetime) else str(done_msk)
-            line += f", выполнено: {done_formatted}"
-        line += ")\n"
-        text += line
+        created_formatted = created_dt.strftime("%Y-%m-%d %H:%M") if isinstance(created_dt, datetime) else str(created_dt)
+        text += f"{status} {cat_str}{agr['text']} ({created_formatted})\n"
+    
+    text += f"\nВсего записей: {len(data)}\nВыполнено: {stats['done']} из {stats['total']} ({stats['percent']}%)"
 
-    text += f"\nВсего записей: {len(data)}"
-
+    for part in split_message(text):
+        await update.message.reply_text(part, parse_mode="Markdown")
+    
     if is_premium(user_id):
+        cat_stats = get_stats_by_category(user_id)
         pdf_bytes = generate_pdf(user_id, stats, cat_stats, data)
         await update.message.reply_document(
             document=pdf_bytes,
             filename="promise_tracker_report.pdf",
-            caption="📎 Ваш PDF-отчёт с графиками прогресса (премиум-доступ)"
+            caption="📎 Ваш PDF-отчёт"
         )
-
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
     status_text = "активен ✅" if premium else "неактивен ❌"
-    if context.args and context.args[0] in ("on", "off"):
-        new_status = context.args[0] == "on"
-        set_premium(user_id, new_status)
-        await update.message.reply_text(f"Премиум-статус изменён: {'активен' if new_status else 'отключён'}.")
-        return
-    await update.message.reply_text(
-        f"⭐ **Премиум-возможности**\n"
+    
+    message = (
+        f"⭐ **Премиум-доступ**\n\n"
         f"Твой статус: {status_text}\n\n"
-        f"• Неограниченное количество категорий (сейчас можно создать только 1)\n"
-        f"• Безлимитные напоминания на конкретные даты через /remindat (бесплатно — 1)\n"
-        f"• Экспорт обещаний в PDF с графиками\n"
+        f"**Что даёт премиум:**\n"
+        f"• Безлимитные напоминания\n"
+        f"• Экспорт в PDF с графиками\n"
         f"• Безлимитные фото-подтверждения\n"
         f"• Заморозка дня (сохраняет серию)\n"
-        f"• Смена питомца на дракончика\n\n"
-        f"👥 **Получить премиум бесплатно:**\n"
-        f"Пригласи друга по реферальной ссылке — и вы оба получите премиум-дни! /invite\n\n"
-        f"Для теста: /premium on / /premium off",
+        f"• Дракончик-питомец\n"
+        f"• Приоритетная поддержка\n\n"
+        f"💎 **Цены:**\n"
+        f"• 30 дней — 50 Telegram Stars\n"
+        f"• 90 дней — 125 Stars (скидка 15%)\n"
+        f"• Навсегда — 500 Stars\n\n"
+        f"👥 **Получить БЕСПЛАТНО:**\n"
+        f"Пригласи друга по ссылке /invite\n\n"
+        f"☕ **Поддержать донатом:**\n"
+        f"ЮMoney: 410011234567890\n"
+        f"T-Банк: 5536 9134 5678 9012"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("⭐ 30 дней (50 Stars)", callback_data="premium_30")],
+        [InlineKeyboardButton("🔥 90 дней (125 Stars)", callback_data="premium_90")],
+        [InlineKeyboardButton("👑 Навсегда (500 Stars)", callback_data="premium_forever")],
+        [InlineKeyboardButton("☕ Поддержать донатом", callback_data="donate_info")],
+    ]
+    
+    await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    payload = update.message.successful_payment.invoice_payload
+    
+    days = 30
+    if payload == "premium_30":
+        days = 30
+    elif payload == "premium_90":
+        days = 90
+    elif payload == "premium_forever":
+        days = 365 * 10  # 10 лет как "навсегда"
+    
+    set_premium(user_id, True, days=days)
+    
+    await update.message.reply_text(
+        f"🎉 **Поздравляем! Премиум-доступ активирован на {days} дней!**\n\n"
+        f"Теперь тебе доступны все премиум-функции.\n"
+        f"Спасибо за поддержку проекта! 🙏",
         parse_mode="Markdown"
     )
 
-# ---------- Категории ----------
 async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cats = get_categories(user_id)
@@ -467,15 +804,15 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if cats:
         keyboard.append([InlineKeyboardButton("🗑 Удалить категорию", callback_data="cat_delete_menu")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_menu")])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ---------- Напоминания ----------
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
         current = get_reminder(user_id)
         if current:
-            await update.message.reply_text(f"Сейчас ежедневное напоминание на {current}. /remind off — отключить, /remind ЧЧ:ММ — изменить.")
+            await update.message.reply_text(f"Сейчас ежедневное напоминание на {current}. /remind off — отключить")
         else:
             await update.message.reply_text("Ежедневное напоминание не установлено. /remind 18:00")
         return
@@ -490,130 +827,84 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 18:00")
         return
     set_reminder(user_id, arg)
-    await update.message.reply_text(f"⏰ Ежедневное напоминание о невыполненных установлено на {arg}")
+    await update.message.reply_text(f"⏰ Ежедневное напоминание установлено на {arg}")
 
-async def remindat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def smart_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
     if not context.args:
         await update.message.reply_text(
-            "Используй:\n"
-            "/remindat ДД.ММ ЧЧ:ММ <текст обещания> — напомнить о конкретном обещании в указанное время\n"
-            "/remindat ДД.ММ ЧЧ:ММ — затем бот попросит выбрать обещание из активных\n"
-            "/remindat каждую <день недели> ЧЧ:ММ <текст> — повторять еженедельно (например, каждую среду 09:00 Йога)\n"
-            "День недели: пн, вт, ср, чт, пт, сб, вс (или английские mon, tue, wed, thu, fri, sat, sun)"
+            "🤖 **Умное напоминание**\n\n"
+            "Просто напишите, что и когда нужно сделать!\n\n"
+            "📌 **Примеры:**\n"
+            "• `Напомни завтра в 10 утра купить хлеб`\n"
+            "• `Каждый понедельник в 9:00 йога`\n"
+            "• `Сделать отчет сегодня в 18:00`\n"
+            "• `25 декабря в 12:00 поздравить маму`\n\n"
+            "💡 Бот сам распознает дату, время и задачу!",
+            parse_mode="Markdown"
         )
         return
-
-    args = context.args
-    if args[0].lower() == "каждую":
-        if len(args) < 3:
-            await update.message.reply_text("Укажи день недели и время. Пример: /remindat каждую среду 09:00 Йога")
-            return
-        days_map = {
-            "пн": 0, "mon": 0,
-            "вт": 1, "tue": 1,
-            "ср": 2, "wed": 2,
-            "чт": 3, "thu": 3,
-            "пт": 4, "fri": 4,
-            "сб": 5, "sat": 5,
-            "вс": 6, "sun": 6
-        }
-        day_str = args[1].lower().rstrip(',')
-        if day_str not in days_map:
-            await update.message.reply_text("Неизвестный день недели.")
-            return
-        recurring_day = days_map[day_str]
-        time_str = args[2]
-        try:
-            datetime.strptime(time_str, "%H:%M")
-        except ValueError:
-            await update.message.reply_text("Неверный формат времени.")
-            return
-        if len(args) > 3:
-            text = " ".join(args[3:])
-        else:
-            await update.message.reply_text("Введи текст обещания после команды.")
-            return
-        if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-            await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-            return
-        add_agreement(user_id, text)
-        last_agr = get_agreements(user_id)[0]
-        agr_id = last_agr["_id"]
-        today = date.today()
-        days_ahead = recurring_day - today.weekday()
+    
+    full_text = " ".join(context.args)
+    remind_date, remind_time, task_text, is_recurring, recurring_day = parse_natural_language(full_text)
+    
+    if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1 and not is_recurring:
+        await update.message.reply_text(
+            "⚠️ Лимит бесплатных напоминаний (1) исчерпан.\n"
+            "💡 Используйте повторяющиеся напоминания - они бесплатны!\n"
+            "🌟 Или приобретите премиум /premium"
+        )
+        return
+    
+    add_agreement(user_id, task_text, difficulty=0)
+    agreements = get_agreements(user_id, only_active=True)
+    if not agreements:
+        await update.message.reply_text("❌ Ошибка при создании обещания")
+        return
+    
+    last_agr = agreements[0]
+    agr_id = last_agr["_id"]
+    
+    if is_recurring and recurring_day is not None:
+        days_ahead = recurring_day - remind_date.weekday()
         if days_ahead <= 0:
             days_ahead += 7
-        next_date = today + timedelta(days=days_ahead)
-        create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
-        await update.message.reply_text(f"🔔 Напоминание о «{text}» будет приходить каждую {day_str.capitalize()} в {time_str}")
-        return
-
-    if len(args) < 2:
-        await update.message.reply_text("Укажи дату и время. Пример: /remindat 05.06 18:00 Купить подарок")
-        return
-    date_str = args[0]
-    time_str = args[1]
-    try:
-        remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
-        if remind_date < date.today():
-            remind_date = remind_date.replace(year=date.today().year + 1)
-    except ValueError:
-        await update.message.reply_text("Неверный формат даты.")
-        return
-    try:
-        datetime.strptime(time_str, "%H:%M")
-    except ValueError:
-        await update.message.reply_text("Неверный формат времени.")
-        return
-
-    if len(args) > 2:
-        text = " ".join(args[2:])
+        next_date = remind_date + timedelta(days=days_ahead)
+        
+        create_scheduled_reminder(user_id, agr_id, next_date, remind_time, 
+                                  is_recurring=True, recurring_day=recurring_day)
+        
+        day_name = [k for k, v in DAYS_RU.items() if v == recurring_day][0]
+        await update.message.reply_text(
+            f"✅ **Напоминание создано!**\n\n"
+            f"📝 Задача: {task_text}\n"
+            f"🔄 Повтор: каждый {day_name.capitalize()} в {remind_time}\n"
+            f"⏰ Первое напоминание: {next_date.strftime('%d.%m.%Y')}",
+            parse_mode="Markdown"
+        )
     else:
-        await update.message.reply_text("Введи текст обещания после команды.")
-        return
-
-    if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-        await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-        return
-
-    add_agreement(user_id, text)
-    last_agr = get_agreements(user_id)[0]
-    agr_id = last_agr["_id"]
-    create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
-    await update.message.reply_text(f"🔔 Напоминание о «{text}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
-
-async def button_remindat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("remindat_"):
-        agr_id = data.split("_", 1)[1]
-        agreement = get_agreement_by_id(agr_id)
-        if not agreement:
-            await query.edit_message_text("Обещание не найдено.")
-            return
-        context.user_data['pending_remindat_agr_id'] = agr_id
-        await query.edit_message_text(
-            f"Введи дату и время для напоминания о «{agreement['text']}» в формате:\n"
-            "`ДД.ММ ЧЧ:ММ` (например, 05.06 18:00)\n"
-            "Или для еженедельного повтора: `каждую среду 09:00`",
+        create_scheduled_reminder(user_id, agr_id, remind_date, remind_time)
+        await update.message.reply_text(
+            f"✅ **Напоминание создано!**\n\n"
+            f"📝 Задача: {task_text}\n"
+            f"📅 Дата: {remind_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Время: {remind_time}",
             parse_mode="Markdown"
         )
 
-# ---------- Сводки ----------
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text(await build_daily_summary(user_id))
+    await update.message.reply_text(await build_daily_summary(user_id), parse_mode="Markdown")
 
 async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
         current = get_summary_time(user_id)
         if current:
-            await update.message.reply_text(f"Сейчас сводка приходит в {current}. /setsummary off — отключить, /setsummary ЧЧ:ММ — изменить.")
+            await update.message.reply_text(f"Сейчас сводка приходит в {current}. /setsummary off — отключить")
         else:
-            await update.message.reply_text("Время сводки не задано. /setsummary 20:00 — установить.")
+            await update.message.reply_text("Время сводки не задано. /setsummary 20:00")
         return
     arg = context.args[0].strip().lower()
     if arg == "off":
@@ -623,192 +914,266 @@ async def set_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         datetime.strptime(arg, "%H:%M")
     except ValueError:
-        await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ, например 20:00")
+        await update.message.reply_text("Неверный формат. Используй ЧЧ:ММ")
         return
     set_summary_time(user_id, arg)
     await update.message.reply_text(f"📋 Ежедневная сводка будет приходить в {arg}.")
 
-async def build_daily_summary(user_id: int) -> str:
-    today = date.today()
-    done_today = db.agreements.count_documents({
-        "user_id": user_id,
-        "is_done": True,
-        "done_at": {"$gte": datetime(today.year, today.month, today.day)}
-    })
-    total = db.agreements.count_documents({"user_id": user_id})
-    done_total = db.agreements.count_documents({"user_id": user_id, "is_done": True})
-    percent = round(done_total / total * 100, 1) if total > 0 else 0.0
+async def pet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    pet = get_pet(user_id)
+    if not pet:
+        await update.message.reply_text("У вас пока нет питомца. Напишите /start!")
+        return
 
-    message = "📋 **Сводка за сегодня**\n\n"
-    if done_today > 0:
-        message += f"✅ Сегодня ты выполнил {done_today} обещаний. Молодец!\n"
+    pet_type = pet["type"]
+    level = pet["level"]
+    mood = pet["mood"]
+    is_sick = pet.get("is_sick", False)
+
+    evolution_map = PET_TYPES[pet_type]["evolution"]
+    current_emoji = evolution_map.get(level, PET_TYPES[pet_type]["emoji"])
+    next_level = min([l for l in evolution_map.keys() if l > level], default=None)
+    next_emoji = evolution_map.get(next_level, "") if next_level else ""
+
+    status_emoji, pet_msg = get_pet_message(user_id)
+    ascii_art = get_pet_ascii_art(pet_type, level, mood, is_sick)
+
+    message = (
+        f"{current_emoji} **{pet['name']}** (уровень {level})\n"
+        f"🍖 Сытость: {pet['hunger']}/200\n"
+        f"😊 Настроение: {pet['mood']}/200 ({status_emoji})\n"
+        f"✨ Опыт: {pet['xp']}/100\n"
+    )
+    if is_sick:
+        message += "🤒 **Питомец болен!** Выполните 3 обещания подряд!\n"
+    message += f"\n```\n{ascii_art}\n```\n{pet_msg}\n"
+    if next_emoji:
+        message += f"\nСледующая эволюция на уровне {next_level}: {next_emoji}"
+
+    keyboard = [[InlineKeyboardButton("🔄 Сменить питомца", callback_data="changepet_start")]]
+    await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = []
+    for pet_type, info in PET_TYPES.items():
+        if info["premium"]:
+            cost_text = "Только премиум"
+        else:
+            cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
+        button_text = f"{info['emoji']} {info['name']} ({cost_text})"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
+    await update.message.reply_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    coins = get_coins(user_id)
+    items = get_shop_items()
+    message = f"🛒 **Магазин достижений** (ваш баланс: {coins} 🪙)\n\n"
+    keyboard = []
+    for item in items:
+        message += f"{item['emoji']} {item['name']} — {item['cost']} 🪙\n"
+        keyboard.append([InlineKeyboardButton(f"Купить {item['name']}", callback_data=f"buy_{item['id']}")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+    await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        await update.message.reply_text("🛡 Заморозка доступна только премиум-пользователям.")
+        return
+    success = use_freeze(user_id)
+    if success:
+        await update.message.reply_text("❄️ День заморожен! Ваша серия не прервётся.")
     else:
-        message += "😴 Сегодня пока нет выполненных обещаний. Не забудь отметить сделанное!\n"
-    message += f"\n📈 **Общий прогресс:** {done_total} из {total} ({percent}%)\n"
-    if percent == 100:
-        message += "🌟 Идеально! Все обещания выполнены."
-    elif percent >= 75:
-        message += "🔥 Отличный результат, продолжай в том же духе!"
-    return message
+        await update.message.reply_text("😔 У вас не осталось заморозок.")
 
-# ---------- Планировщик ----------
-async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
-    now_utc = datetime.utcnow()
-    now_msk = now_utc + MSK_OFFSET
-    now_time = now_msk.strftime("%H:%M")
-    today_msk = now_msk.date()
+async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    challenges = get_active_challenges()
+    if not challenges:
+        await update.message.reply_text("Сегодня пока нет активных челленджей.")
+        return
+    for challenge in challenges:
+        participants = len(challenge.get("participants", []))
+        completed = len(challenge.get("completed", []))
+        message = (
+            f"🌍 **{challenge['title']}**\n"
+            f"📝 {challenge['description']}\n"
+            f"👥 Участников: {participants}\n"
+            f"✅ Выполнили: {completed}\n"
+        )
+        keyboard = [[InlineKeyboardButton("Я участвую!", callback_data=f"joinchallenge_{str(challenge['_id'])}")]]
+        await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    create_daily_challenge()
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    coins = get_coins(user_id)
+    await update.message.reply_text(f"🪙 Ваш баланс: {coins} монет.")
 
-    users_remind = get_users_with_reminders()
-    for user_id, remind_time in users_remind:
-        if remind_time == now_time:
-            agreements = get_agreements(user_id, only_active=True)
-            if agreements:
-                undone = [(str(a["_id"]), a["text"]) for a in agreements if not a["is_done"]]
-                if undone:
-                    streak = get_stats(user_id)["streak"]
-                    if streak >= 7:
-                        message = f"🔥 Твоя серия: {streak} дней! Не прерывай!\n\n"
-                    elif streak >= 3:
-                        message = f"⚠️ Серия {streak} дня. Продолжай!\n\n"
-                    else:
-                        message = "🔔 **Напоминание!** Невыполненные обещания:\n\n"
-                    for _, text in undone:
-                        message += f"⬜ {text}\n"
-                    message += "\nНе забудь выполнить! /list"
-                    keyboard = [
-                        [InlineKeyboardButton("✅ Сделал", callback_data=f"quickdone_{user_id}"),
-                         InlineKeyboardButton("⏳ Отложить на час", callback_data=f"quickdelay_{user_id}"),
-                         InlineKeyboardButton("❌ Пропустил", callback_data=f"quickskip_{user_id}")]
-                    ]
-                    try:
-                        await context.application.bot.send_message(
-                            chat_id=user_id, text=message, parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                    except Exception as e:
-                        logging.error(f"Ошибка отправки напоминания {user_id}: {e}")
+async def motivate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    messages = [
+        "💪 Ты можешь всё, что задумал(а)!",
+        "🌟 Даже маленький шаг — это прогресс!",
+        "🎯 Начало — самое сложное. Просто сделай первый шаг!",
+        "🔥 Твоя дисциплина сегодня на высоте!",
+        "⭐ Каждое выполненное обещание делает тебя сильнее!",
+        "🌈 Верь в себя! У тебя всё получится!",
+        "🏆 Ты — автор своей истории успеха!",
+        "🎉 Празднуй маленькие победы — они ведут к большим!",
+    ]
+    await update.message.reply_text(random.choice(messages))
 
-    for user_id, _ in users_remind:
-        stats = get_stats(user_id)
-        if stats["streak"] >= 3:
-            last_done_dates = [d["_id"] for d in db.agreements.aggregate([
-                {"$match": {"user_id": user_id, "is_done": True}},
-                {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$done_at"}}}},
-                {"$sort": {"_id": -1}},
-                {"$limit": 2}
-            ])]
-            if len(last_done_dates) == 1 or (len(last_done_dates) > 1 and last_done_dates[0] != today_msk.isoformat() and last_done_dates[1] != today_msk.isoformat()):
-                try:
-                    await context.application.bot.send_message(
-                        chat_id=user_id,
-                        text="⚠️ Твоя серия под угрозой! Если сегодня не выполнишь обещание, прогресс обнулится."
-                    )
-                except:
-                    pass
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет доступа.")
+        return
+    stats = get_admin_stats()
+    
+    # Получаем последний фидбек
+    recent_feedback = get_recent_feedback(5)
+    feedback_text = ""
+    if recent_feedback:
+        feedback_text = "\n📝 **Последний фидбек:**\n"
+        for fb in recent_feedback:
+            feedback_text += f"• @{fb['username']}: {fb['text'][:50]}...\n"
+    
+    message = (
+        "📊 **Статистика бота**\n\n"
+        f"👥 Пользователей: {stats['total_users']}\n"
+        f"📝 Обещаний: {stats['total_agreements']}\n"
+        f"⭐ Премиум: {stats['premium_users']}\n"
+        f"📅 Активных сегодня: {stats['active_today']}\n"
+        f"👥 Рефералов: {stats['total_referrals']}\n"
+        f"{feedback_text}"
+    )
+    await update.message.reply_text(message, parse_mode="Markdown")
 
-    pending = get_pending_reminders_for_now(today_msk, now_time)
-    for reminder_id, user_id, text in pending:
-        try:
-            await context.application.bot.send_message(chat_id=user_id, text=f"🔔 **Напоминание:** {text}")
-            delete_scheduled_reminder(reminder_id)
-        except Exception as e:
-            logging.error(f"Ошибка отправки запланированного напоминания {reminder_id}: {e}")
+async def share_achievement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    stats = get_stats(user_id)
+    
+    share_text = (
+        f"🏆 **Мой прогресс в Promise Tracker!**\n\n"
+        f"✅ Выполнено обещаний: {stats['done']}\n"
+        f"🔥 Серия: {stats['streak']} дней\n"
+        f"⭐ Уровень: {stats['xp']//100 + 1}\n\n"
+        f"Присоединяйся: t.me/{BOT_USERNAME}"
+    )
+    
+    await update.message.reply_text(
+        f"📢 **Поделись своим прогрессом!**\n\n{share_text}\n\n"
+        f"Скопируй этот текст и отправь в любой чат!\n"
+        f"За каждого перешедшего по твоей ссылке ты получишь премиум! /invite",
+        parse_mode="Markdown"
+    )
 
-    users_summary = get_users_with_summary()
-    for user_id, summary_time in users_summary:
-        if summary_time == now_time:
-            try:
-                await context.application.bot.send_message(
-                    chat_id=user_id,
-                    text=await build_daily_summary(user_id),
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logging.error(f"Ошибка отправки сводки {user_id}: {e}")
-
-    if now_msk.strftime("%H:%M") == "23:55":
-        challenges = get_active_challenges()
-        for ch in challenges:
-            completed = check_challenge_completion(str(ch["_id"]))
-            if completed:
-                message = (
-                    f"🏁 **Итоги челленджа «{ch['title']}»**\n"
-                    f"✅ Выполнили: {len(completed)} из {len(ch.get('participants', []))}\n"
-                    f"Каждый выполнивший получил по 100 монет! 🪙"
-                )
-                for user_id in ch.get("participants", []):
-                    try:
-                        await context.application.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
-                    except:
-                        pass
-
-    if now_msk.strftime("%H:%M") == "03:00":
-        all_users = db.users.find({})
-        for user in all_users:
-            uid = user["user_id"]
-            if lose_level_if_inactive(uid):
-                try:
-                    await context.application.bot.send_message(
-                        chat_id=uid,
-                        text="⚠️ Твой питомец потерял уровень из-за долгого отсутствия! Возвращайся и выполняй обещания."
-                    )
-                except:
-                    pass
-
-# ---------- Обработчик кнопок ----------
+# ---------- Обработчики ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # Quick Actions
-    if data.startswith("quickdone_"):
-        user_id = query.from_user.id
-        agreements = get_agreements(user_id, only_active=True)
-        if agreements:
-            for a in agreements:
-                if not a["is_done"]:
-                    mark_done(str(a["_id"]))
-                    await query.edit_message_text("✅ Отмечено как выполненное!")
-                    return
-        await query.edit_message_text("Все обещания уже выполнены!")
-        return
-    elif data.startswith("quickdelay_"):
-        await query.edit_message_text("⏳ Напоминание отложено на час. Я напомню позже.")
-        return
-    elif data.startswith("quickskip_"):
-        await query.edit_message_text("❌ Пропущено. Не забудь выполнить позже!")
+    if data == "back_to_menu":
+        await menu(update, context)
         return
 
     if data.startswith("diff_"):
         await difficulty_callback(update, context)
         return
-    if data.startswith("remindat_"):
-        await button_remindat(update, context)
-        return
-    if data.startswith("buy_"):
-        await buy_callback(update, context)
-        return
-    if data.startswith("joinchallenge_"):
-        await join_challenge_callback(update, context)
-        return
-    if data.startswith("changepet_"):
-        await changepet_callback(update, context)
-        return
-    if data == "changepet_start":
-        await changepet_start(update, context)
+    
+    if data.startswith("done_"):
+        agr_id = data.split("_", 1)[1]
+        reward = mark_done(agr_id)
+        user_id = query.from_user.id
+        
+        if reward:
+            moto_msg = get_motivation_message("task_completed")
+            coins_msg = get_coins_message(reward["coins"])
+            await query.edit_message_text(
+                f"✅ Выполнено: «{reward['text'][:50]}»\n\n"
+                f"{moto_msg}\n"
+                f"{coins_msg}\n"
+                f"✨ +{reward['xp']} опыта"
+            )
+        else:
+            await query.edit_message_text("✅ Отмечено выполненным!")
+        
+        update_pet_stats(user_id, hunger_delta=20, mood_delta=30, performed=True)
+        status_emoji, pet_msg = get_pet_message(user_id)
+        await query.message.reply_text(pet_msg)
+        
+        new_achievements = check_achievements(user_id)
+        for key in new_achievements:
+            if key.startswith("streak_"):
+                streak_val = int(key.split("_")[1])
+                milestone_msg = check_streak_milestone(streak_val)
+                if milestone_msg:
+                    await query.message.reply_text(f"🎉 {milestone_msg}")
+                    add_coins(user_id, 20)
+            else:
+                name, desc = ACHIEVEMENTS.get(key, (key, ""))
+                if name:
+                    await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!", parse_mode="Markdown")
+        
+        if can_attach_photo(user_id):
+            context.user_data['pending_photo_agreement_id'] = agr_id
+            keyboard = [[
+                InlineKeyboardButton("📷 Да", callback_data="attach_photo"),
+                InlineKeyboardButton("❌ Нет", callback_data="skip_photo")
+            ]]
+            await query.message.reply_text("Хотите прикрепить фото?", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    if data == "cat_create":
+    elif data.startswith("delete_"):
+        agr_id = data.split("_", 1)[1]
+        agreement = get_agreement_by_id(agr_id)
+        if not agreement:
+            await query.edit_message_text("Обещание не найдено.")
+            return
+        keyboard = [[
+            InlineKeyboardButton("✅ Да", callback_data=f"confirm_delete_{agr_id}"),
+            InlineKeyboardButton("❌ Нет", callback_data="show_list")
+        ]]
+        await query.edit_message_text(f"Удалить «{agreement['text']}»?", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data.startswith("confirm_delete_"):
+        agr_id = data.split("_", 2)[2]
+        delete_agreement(agr_id)
+        await query.edit_message_text("🗑 Удалено.")
+        user_id = query.from_user.id
+        text, markup = build_list_message(user_id, only_active=True)
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    elif data == "show_list":
+        user_id = query.from_user.id
+        text, markup = build_list_message(user_id, only_active=True)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    elif data == "attach_photo":
+        await query.edit_message_text("Отправьте фото. /cancel для отмены")
+        context.user_data['awaiting_photo'] = True
+        return
+
+    elif data == "skip_photo":
+        if 'pending_photo_agreement_id' in context.user_data:
+            del context.user_data['pending_photo_agreement_id']
+        await query.edit_message_text("Фото не прикреплено.")
+        return
+
+    elif data == "cat_create":
         user_id = query.from_user.id
         count = get_category_count(user_id)
         if not is_premium(user_id) and count >= 1:
-            await query.edit_message_text("❌ В бесплатной версии можно создать только 1 категорию. Приобрети премиум! /premium")
+            await query.edit_message_text("❌ В бесплатной версии можно создать только 1 категорию.")
             return
         context.user_data['awaiting_category_name'] = True
         await query.edit_message_text("Введи название новой категории:")
+        return
+
     elif data == "cat_delete_menu":
         user_id = query.from_user.id
         cats = get_categories(user_id)
@@ -817,86 +1182,105 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"catdel_{str(cat['_id'])}")] for cat in cats]
         keyboard.append([InlineKeyboardButton("« Назад", callback_data="cat_back")])
-        await query.edit_message_text("Выбери категорию для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Выбери категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
     elif data.startswith("catdel_"):
         cat_id = data.split("_", 1)[1]
-        try:
-            oid = ObjectId(cat_id)
-        except:
-            await query.edit_message_text("Неверный идентификатор категории.")
-            return
-        db.categories.delete_one({"_id": oid})
-        await query.edit_message_text("Категория удалена.")
+        user_id = query.from_user.id
+        if delete_category(user_id, cat_id):
+            await query.edit_message_text("Категория удалена.")
+        else:
+            await query.edit_message_text("Не удалось удалить категорию.")
+        return
+
     elif data == "cat_back":
         await categories_menu(update, context)
         return
-    elif data.startswith("done_"):
-        agr_id = data.split("_", 1)[1]
-        mark_done(agr_id)
-        user_id = query.from_user.id
-        update_pet_stats(user_id, hunger_delta=20, mood_delta=30, performed=True)
-        status_emoji, pet_msg = get_pet_message(user_id)
-        new_achievements = check_achievements(user_id)
-        await query.edit_message_text("✅ Отмечено выполненным!")
-        await query.message.reply_text(pet_msg)
-        for key in new_achievements:
-            name, desc = ACHIEVEMENTS[key]
-            await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!\n_{desc}_", parse_mode="Markdown")
 
-        if can_attach_photo(user_id):
-            context.user_data['pending_photo_agreement_id'] = agr_id
-            keyboard = [[
-                InlineKeyboardButton("📷 Да, прикрепить фото", callback_data="attach_photo"),
-                InlineKeyboardButton("❌ Нет, спасибо", callback_data="skip_photo")
-            ]]
-            await query.message.reply_text("Хотите прикрепить фото к выполненному обещанию? (1 фото в день бесплатно, премиум безлимит)", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data == "changepet_start":
+        keyboard = []
+        for pet_type, info in PET_TYPES.items():
+            if info["premium"]:
+                cost_text = "Только премиум"
+            else:
+                cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
+            button_text = f"{info['emoji']} {info['name']} ({cost_text})"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+        await query.edit_message_text("Выберите питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data.startswith("changepet_"):
+        pet_type = data.split("_", 1)[1]
+        user_id = query.from_user.id
+        info = PET_TYPES[pet_type]
+        if info["premium"] and not is_premium(user_id):
+            await query.edit_message_text("❌ Дракончик только для премиум.")
+            return
+        cost = info["cost"]
+        if cost > 0:
+            current_coins = get_coins(user_id)
+            if current_coins < cost:
+                await query.edit_message_text(f"❌ Нужно {cost} монет, у вас {current_coins}.")
+                return
+        success = change_pet(user_id, pet_type, cost_coins=cost)
+        if success:
+            await query.edit_message_text(f"✅ Питомец изменён на {info['emoji']} {info['name']}!")
         else:
-            await query.message.reply_text("⚠️ Дневной лимит фото исчерпан (1 бесплатно). Премиум снимает ограничение! /premium")
+            await query.edit_message_text("❌ Не удалось сменить питомца.")
+        return
 
-    elif data == "attach_photo":
-        await query.edit_message_text("Отправьте фото. Для отмены нажмите /cancel")
-        context.user_data['awaiting_photo'] = True
-
-    elif data == "skip_photo":
-        if 'pending_photo_agreement_id' in context.user_data:
-            del context.user_data['pending_photo_agreement_id']
-        await query.edit_message_text("Фото не прикреплено.")
-
-    elif data.startswith("delete_"):
-        agr_id = data.split("_", 1)[1]
-        agreement = get_agreement_by_id(agr_id)
-        if not agreement:
-            await query.edit_message_text("Обещание не найдено."); return
-        keyboard = [[
-            InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{agr_id}"),
-            InlineKeyboardButton("❌ Нет, оставить", callback_data=f"cancel_delete_{agr_id}")
-        ]]
-        await query.edit_message_text(f"Удалить «{agreement['text']}»?", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data.startswith("edit_"):
-        agr_id = data.split("_", 1)[1]
-        agreement = get_agreement_by_id(agr_id)
-        if not agreement:
-            await query.edit_message_text("Обещание не найдено."); return
-        context.user_data['editing_agreement_id'] = agr_id
-        await query.edit_message_text(f"Введи новый текст для «{agreement['text']}»:")
-    elif data.startswith("confirm_delete_"):
-        agr_id = data.split("_", 2)[2]
-        agreement = get_agreement_by_id(agr_id)
-        if agreement:
-            delete_agreement(agr_id)
-            await query.edit_message_text("🗑 Удалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 К активным", callback_data="show_list")]]))
-        else:
-            await query.edit_message_text("Уже удалено.")
-    elif data.startswith("cancel_delete_"):
+    elif data.startswith("buy_"):
+        item_id = data.split("_", 1)[1]
         user_id = query.from_user.id
-        text, markup = build_list_message(user_id, only_active=True)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-    elif data == "show_list":
-        user_id = query.from_user.id
-        text, markup = build_list_message(user_id, only_active=True)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        success, msg = buy_item(user_id, item_id)
+        await query.edit_message_text(msg)
+        return
 
-# ---------- Обработчик сообщений ----------
+    elif data.startswith("joinchallenge_"):
+        challenge_id = data.split("_", 1)[1]
+        user_id = query.from_user.id
+        success, msg = join_challenge(user_id, challenge_id)
+        await query.edit_message_text(msg)
+        return
+
+    elif data == "donate_info":
+        await query.edit_message_text(
+            "☕ **Поддержать проект**\n\n"
+            "Если бот помогает вам быть продуктивнее, вы можете поддержать его развитие:\n\n"
+            "💳 **ЮMoney:** 410011234567890\n"
+            "🏦 **Т-Банк:** 5536 9134 5678 9012\n"
+            "⭐ **Telegram Stars:** через кнопки выше\n\n"
+            "Спасибо, что помогаете боту расти! 🙏",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif data.startswith("premium_"):
+        days = 30
+        stars_cost = 50
+        if data == "premium_30":
+            days = 30
+            stars_cost = 50
+        elif data == "premium_90":
+            days = 90
+            stars_cost = 125
+        elif data == "premium_forever":
+            days = 3650
+            stars_cost = 500
+        
+        await context.bot.send_invoice(
+            chat_id=query.message.chat_id,
+            title="Promise Tracker Premium",
+            description=f"Премиум-доступ на {days if days < 3650 else 'все время'} дней",
+            payload=data,
+            currency="XTR",
+            prices=[LabeledPrice("Premium", stars_cost)],
+            start_parameter="premium_subscription"
+        )
+        return
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text if update.message.text else ""
     user_id = update.effective_user.id
@@ -908,71 +1292,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if agr_id:
             if can_attach_photo(user_id):
                 mark_done(agr_id, photo_file_id=photo_file_id)
-                await update.message.reply_text("📷 Фото прикреплено к обещанию!")
+                await update.message.reply_text("📷 Фото прикреплено! +10 монет за выполнение!")
             else:
-                await update.message.reply_text("⚠️ Дневной лимит исчерпан. Фото не сохранено.")
+                await update.message.reply_text("⚠️ Дневной лимит фото исчерпан.")
         del context.user_data['awaiting_photo']
         del context.user_data['pending_photo_agreement_id']
-        return
-
-    if 'pending_remindat_agr_id' in context.user_data:
-        agr_id = context.user_data.pop('pending_remindat_agr_id')
-        parts = text.split()
-        if not parts:
-            await update.message.reply_text("Введи дату и время. Пример: 05.06 18:00 или каждую среду 09:00")
-            return
-        if parts[0].lower() == "каждую":
-            days_map = {"пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,"вс":6,"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
-            if len(parts) < 3:
-                await update.message.reply_text("Укажи день недели и время. Пример: каждую среду 09:00")
-                return
-            day_str = parts[1].lower().rstrip(',')
-            if day_str not in days_map:
-                await update.message.reply_text("Неизвестный день недели.")
-                return
-            recurring_day = days_map[day_str]
-            time_str = parts[2]
-            try:
-                datetime.strptime(time_str, "%H:%M")
-            except ValueError:
-                await update.message.reply_text("Неверный формат времени.")
-                return
-            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-                return
-            today = date.today()
-            days_ahead = recurring_day - today.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
-            next_date = today + timedelta(days=days_ahead)
-            create_scheduled_reminder(user_id, agr_id, next_date, time_str, is_recurring=True, recurring_day=recurring_day)
-            agreement = get_agreement_by_id(agr_id)
-            await update.message.reply_text(f"🔔 Напоминание о «{agreement['text']}» будет приходить каждую {day_str.capitalize()} в {time_str}")
-            return
-        else:
-            if len(parts) < 2:
-                await update.message.reply_text("Укажи дату и время через пробел. Пример: 05.06 18:00")
-                return
-            date_str = parts[0]
-            time_str = parts[1]
-            try:
-                remind_date = datetime.strptime(date_str, "%d.%m").replace(year=date.today().year).date()
-                if remind_date < date.today():
-                    remind_date = remind_date.replace(year=date.today().year + 1)
-            except ValueError:
-                await update.message.reply_text("Неверный формат даты.")
-                return
-            try:
-                datetime.strptime(time_str, "%H:%M")
-            except ValueError:
-                await update.message.reply_text("Неверный формат времени.")
-                return
-            if not is_premium(user_id) and count_scheduled_reminders(user_id) >= 1:
-                await update.message.reply_text("Лимит бесплатных напоминаний (1) исчерпан. Приобрети премиум /premium")
-                return
-            create_scheduled_reminder(user_id, agr_id, remind_date, time_str)
-            agreement = get_agreement_by_id(agr_id)
-            await update.message.reply_text(f"🔔 Напоминание о «{agreement['text']}» установлено на {remind_date.strftime('%d.%m.%Y')} в {time_str}")
         return
 
     if context.user_data.get('awaiting_category_name'):
@@ -980,25 +1304,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if create_category(user_id, text):
             await update.message.reply_text(f"Категория «{text}» создана.")
         else:
-            await update.message.reply_text("Категория с таким именем уже существует.")
+            await update.message.reply_text("Категория уже существует.")
         return
 
-    if 'editing_agreement_id' in context.user_data:
-        agr_id = context.user_data.pop('editing_agreement_id')
-        update_agreement(agr_id, text)
-        await update.message.reply_text(f"✏️ Изменено: \"{text}\"")
-        t, m = build_list_message(user_id, only_active=True)
-        await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
+    if context.user_data.get('adding_agreement_no_cat'):
+        del context.user_data['adding_agreement_no_cat']
+        await show_difficulty_selection(update, text)
         return
 
     if text == "➕ Новое обещание":
-        await update.message.reply_text("Напиши текст обещания, а затем выбери сложность.")
+        await update.message.reply_text("Напиши текст обещания:")
         context.user_data['adding_agreement_no_cat'] = True
         return
-
     elif text == "📝 Активные":
         t, m = build_list_message(user_id, only_active=True)
-        await update.message.reply_text(t, parse_mode="Markdown", reply_markup=m)
+        for part in split_message(t):
+            await update.message.reply_text(part, parse_mode="Markdown", reply_markup=m if part == t else None)
     elif text == "📜 История":
         await history_command(update, context)
     elif text == "📂 Категории":
@@ -1006,9 +1327,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "⏰ Напоминания":
         rem = get_reminder(user_id)
         if rem:
-            await update.message.reply_text(f"Ежедневное напоминание на {rem}. /remind off, /remind ЧЧ:ММ")
+            await update.message.reply_text(f"Ежедневное напоминание на {rem}\n/remind off — отключить")
         else:
-            await update.message.reply_text("Ежедневное напоминание не установлено. /remind 18:00")
+            await update.message.reply_text("Ежедневное напоминание не установлено\n/remind 18:00 — установить")
     elif text == "📋 Сводка":
         await summary_command(update, context)
     elif text == "📊 Статистика":
@@ -1033,200 +1354,106 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await challenges_command(update, context)
     elif text == "🪙 Баланс":
         await balance_command(update, context)
-    else:
-        await show_difficulty_selection(update, text)
-
-async def add_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = query.from_user.id
-    if data == "addcat_none":
-        context.user_data['adding_agreement_no_cat'] = True
-        await query.edit_message_text("Введи текст обещания (без категории):")
-    elif data.startswith("addcat_"):
-        cat_id = data.split("_", 1)[1]
-        context.user_data['selected_category_id'] = cat_id
-        cat_name = next((c["name"] for c in get_categories(user_id) if str(c["_id"]) == cat_id), "")
-        await query.edit_message_text(f"Введи текст обещания для категории «{cat_name}»:")
-
-# ---------- Питомец ----------
-async def pet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    pet = get_pet(user_id)
-    if not pet:
-        await update.message.reply_text("У вас пока нет питомца. Напишите /start, чтобы получить его!")
-        return
-
-    pet_type = pet["type"]
-    level = pet["level"]
-    mood = pet["mood"]
-    is_sick = pet.get("is_sick", False)
-
-    evolution_map = PET_TYPES[pet_type]["evolution"]
-    current_emoji = evolution_map.get(level, PET_TYPES[pet_type]["emoji"])
-    next_level = min([l for l in evolution_map.keys() if l > level], default=None)
-    next_emoji = evolution_map.get(next_level, "") if next_level else ""
-
-    status_emoji, pet_msg = get_pet_message(user_id)
-    ascii_art = get_pet_ascii_art(pet_type, level, mood, is_sick)
-
-    message = (
-        f"{current_emoji} **{pet['name']}** (уровень {level})\n"
-        f"🍖 Сытость: {pet['hunger']}/200\n"
-        f"😊 Настроение: {pet['mood']}/200 ({status_emoji})\n"
-        f"✨ Опыт: {pet['xp']}/100\n"
-    )
-    if is_sick:
-        message += "🤒 **Питомец болен!** Выполните 3 обещания подряд, чтобы вылечить.\n"
-    message += f"\n```\n{ascii_art}\n```\n{pet_msg}\n"
-    if next_emoji:
-        message += f"\nСледующая эволюция на уровне {next_level}: {next_emoji}"
-
-    keyboard = [[InlineKeyboardButton("🔄 Сменить питомца", callback_data="changepet_start")]]
-    await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def changepet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    keyboard = []
-    for pet_type, info in PET_TYPES.items():
-        if info["premium"]:
-            cost_text = "Только премиум"
-        else:
-            cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
-        button_text = f"{info['emoji']} {info['name']} ({cost_text})"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
-    await query.edit_message_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def changepet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "changepet_start":
-        await changepet_start(update, context)
-        return
-    pet_type = data.split("_", 1)[1]
-    user_id = query.from_user.id
-    info = PET_TYPES[pet_type]
-    if info["premium"] and not is_premium(user_id):
-        await query.edit_message_text("❌ Дракончик доступен только премиум-пользователям. Приобретите премиум /premium")
-        return
-    cost = info["cost"]
-    if cost > 0:
-        current_coins = get_coins(user_id)
-        if current_coins < cost:
-            await query.edit_message_text(f"❌ Недостаточно монет. Нужно {cost}, у вас {current_coins}.")
-            return
-    success = change_pet(user_id, pet_type, cost_coins=cost)
-    if success:
-        await query.edit_message_text(f"✅ Питомец изменён на {info['emoji']} {info['name']}!")
-    else:
-        await query.edit_message_text("❌ Не удалось сменить питомца.")
-
-async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = []
-    for pet_type, info in PET_TYPES.items():
-        if info["premium"]:
-            cost_text = "Только премиум"
-        else:
-            cost_text = f"{info['cost']} 🪙" if info['cost'] > 0 else "Бесплатно"
-        button_text = f"{info['emoji']} {info['name']} ({cost_text})"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"changepet_{pet_type}")])
-    await update.message.reply_text("Выберите нового питомца:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ---------- Магазин ----------
-async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    coins = get_coins(user_id)
-    items = get_shop_items()
-    message = f"🛒 **Магазин достижений** (ваш баланс: {coins} 🪙)\n\n"
-    keyboard = []
-    for item in items:
-        message += f"{item['emoji']} {item['name']} — {item['cost']} 🪙\n"
-        keyboard.append([InlineKeyboardButton(f"Купить {item['name']} ({item['cost']} 🪙)", callback_data=f"buy_{item['id']}")])
-    await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("buy_"):
-        item_id = data.split("_", 1)[1]
-        user_id = query.from_user.id
-        success, msg = buy_item(user_id, item_id)
-        await query.edit_message_text(msg)
-
-# ---------- Заморозка ----------
-async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_premium(user_id):
-        await update.message.reply_text("🛡 Заморозка доступна только премиум-пользователям. Приобретите премиум /premium")
-        return
-    success = use_freeze(user_id)
-    if success:
-        await update.message.reply_text("❄️ День заморожен! Ваша серия не прервётся, даже если сегодня не будет выполненных обещаний.")
-    else:
-        await update.message.reply_text("😔 У вас не осталось заморозок. Они обновляются каждый месяц с продлением премиума.")
-
-# ---------- Челленджи ----------
-async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    challenges = get_active_challenges()
-    if not challenges:
-        await update.message.reply_text("Сегодня пока нет активных челленджей.")
-        return
-    for challenge in challenges:
-        participants = len(challenge.get("participants", []))
-        completed = len(challenge.get("completed", []))
-        message = (
-            f"🌍 **{challenge['title']}**\n"
-            f"📝 {challenge['description']}\n"
-            f"👥 Участников: {participants}\n"
-            f"✅ Выполнили: {completed}\n"
+    elif text == "🤖 Напомнить":
+        await update.message.reply_text(
+            "🤖 **Умное напоминание**\n\n"
+            "Просто напишите:\n"
+            "`/remindme Завтра в 10 утра купить хлеб`\n\n"
+            "Или /remindme без текста для примеров",
+            parse_mode="Markdown"
         )
-        keyboard = [[InlineKeyboardButton("Я участвую!", callback_data=f"joinchallenge_{str(challenge['_id'])}")]]
-        await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif text == "💬 Фидбек":
+        await update.message.reply_text(
+            "💬 **Поделись идеей или проблемой**\n\n"
+            "Напишите /feedback и ваш текст\n"
+            "Пример: `/feedback Хочу больше мотивации!`\n\n"
+            "За полезные идеи дарим монеты! 🎁"
+        )
+    elif text == "❌ Отмена":
+        await cancel_command(update, context)
+    else:
+        if text and not text.startswith('/'):
+            await show_difficulty_selection(update, text)
 
-async def join_challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("joinchallenge_"):
-        challenge_id = data.split("_", 1)[1]
-        user_id = query.from_user.id
-        success, msg = join_challenge(user_id, challenge_id)
-        await query.edit_message_text(msg)
-
-async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    coins = get_coins(user_id)
-    await update.message.reply_text(f"🪙 Ваш баланс: {coins} монет.")
-
-async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    admin_id = int(os.environ.get("ADMIN_ID", 0))
-    if user_id != admin_id:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
+async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
+    if context.bot is None:
         return
-    stats = get_admin_stats()
-    message = (
-        "📊 **Статистика бота**\n\n"
-        f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"📝 Всего обещаний: {stats['total_agreements']}\n"
-        f"⭐ Премиум-пользователей: {stats['premium_users']}\n"
-        f"📅 Активных сегодня: {stats['active_today']}\n"
-        f"👥 Приглашено рефералов: {stats['total_referrals']}\n"
-    )
-    await update.message.reply_text(message, parse_mode="Markdown")
+    
+    now_utc = datetime.utcnow()
+    now_msk = now_utc + MSK_OFFSET
+    now_time = now_msk.strftime("%H:%M")
+    today_msk = now_msk.date()
 
+    create_daily_challenge()
+
+    users_remind = get_users_with_reminders()
+    for user_id, remind_time in users_remind:
+        if remind_time == now_time:
+            agreements = get_agreements(user_id, only_active=True)
+            if agreements:
+                undone = [a["text"] for a in agreements if not a["is_done"]]
+                if undone:
+                    message = "🔔 **Напоминание!**\n\n"
+                    for t in undone[:5]:
+                        message += f"⬜ {t}\n"
+                    message += "\nСписок: /list"
+                    try:
+                        await context.bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+                    except:
+                        pass
+
+    pending = get_pending_reminders_for_now(today_msk, now_time)
+    for reminder_id, user_id, text in pending:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"🔔 **Напоминание:** {text}", parse_mode="Markdown")
+            delete_scheduled_reminder(reminder_id)
+        except:
+            pass
+
+    users_summary = get_users_with_summary()
+    for user_id, summary_time in users_summary:
+        if summary_time == now_time:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=await build_daily_summary(user_id), parse_mode="Markdown")
+            except:
+                pass
+
+    if now_time == "09:00":
+        for user_id, _ in users_remind[:10]:
+            if random.random() < 0.3:
+                try:
+                    msg = random.choice(MOTIVATIONAL_MESSAGES["morning_greetings"])
+                    await context.bot.send_message(chat_id=user_id, text=msg)
+                except:
+                    pass
+
+    if now_time == "21:00":
+        for user_id, _ in users_remind[:10]:
+            if random.random() < 0.2:
+                try:
+                    msg = random.choice(MOTIVATIONAL_MESSAGES["evening_encouragement"])
+                    await context.bot.send_message(chat_id=user_id, text=msg)
+                except:
+                    pass
+
+    if now_time == "03:00":
+        for user in db.users.find():
+            uid = user["user_id"]
+            if lose_level_if_inactive(uid):
+                try:
+                    await context.bot.send_message(chat_id=uid, text="⚠️ Твой питомец потерял уровень из-за долгого отсутствия!")
+                except:
+                    pass
+
+# ---------- Main ----------
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не задан")
-    global db
-    job_queue = JobQueue()
-    application = Application.builder().token(BOT_TOKEN).job_queue(job_queue).build()
+    
+    application = Application.builder().token(BOT_TOKEN).build()
     init_db()
-
+    
+    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("help", help_command))
@@ -1238,7 +1465,8 @@ def main():
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("premium", premium_info))
     application.add_handler(CommandHandler("remind", remind_command))
-    application.add_handler(CommandHandler("remindat", remindat_command))
+    application.add_handler(CommandHandler("remindme", smart_remind))
+    application.add_handler(CommandHandler("smartremind", smart_remind))
     application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("setsummary", set_summary_command))
@@ -1248,14 +1476,27 @@ def main():
     application.add_handler(CommandHandler("freeze", freeze_command))
     application.add_handler(CommandHandler("challenges", challenges_command))
     application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("motivate", motivate_command))
+    application.add_handler(CommandHandler("feedback", feedback_command))
+    application.add_handler(CommandHandler("share", share_achievement))
     application.add_handler(CommandHandler("admin", admin_stats_command))
-    application.add_handler(CallbackQueryHandler(button_remindat, pattern="^remindat_"))
-    application.add_handler(CallbackQueryHandler(add_category_callback, pattern="^addcat_"))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    
+    # Платежи
+    application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    
+    # Колбэки и сообщения
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    job_queue.run_repeating(check_scheduled_jobs, interval=60, first=10)
+    application.add_handler(MessageHandler(filters.PHOTO, handle_message))
+    
+    # Планировщик
+    if application.job_queue:
+        application.job_queue.run_repeating(check_scheduled_jobs, interval=60, first=10)
+    
     keep_alive()
+    logging.info("Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
