@@ -38,7 +38,7 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = "MyPromiseTrackerBot"  # ЗАМЕНИТЕ НА ВАШ USERNAME
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "MyPromiseTrackerBot")  # Установите через переменные окружения
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 MSK_OFFSET = timedelta(hours=3)
 
@@ -416,8 +416,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_id = referrer["user_id"]
 
     create_user(user_id, referrer_id)
-    
-    # Обновляем username в базе
     db.users.update_one({"user_id": user_id}, {"$set": {"username": username}})
 
     xp = get_xp(user_id)
@@ -451,7 +449,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # Уведомление админу о новом пользователе
     if ADMIN_ID:
         user_count = db.users.count_documents({})
         try:
@@ -537,7 +534,6 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     feedback_text = " ".join(context.args)
-    
     save_feedback(user_id, username, feedback_text)
     add_coins(user_id, 10)
     
@@ -564,14 +560,12 @@ async def add_agreement_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Напиши текст после /add. Пример: `/add Прочитать книгу`")
         return
     text = " ".join(context.args)
-    await show_difficulty_selection(update, text)
-
-async def show_difficulty_selection(update: Update, text: str):
-    safe_text = text.replace("|", " ").replace("_", " ")
+    # Сохраняем текст в контексте для безопасной передачи
+    context.user_data['pending_agreement_text'] = text
     keyboard = [
-        [InlineKeyboardButton("🌱 Легко", callback_data=f"diff_{safe_text}|0"),
-         InlineKeyboardButton("⚡️ Средне", callback_data=f"diff_{safe_text}|1"),
-         InlineKeyboardButton("🔥 Хардкор", callback_data=f"diff_{safe_text}|2")]
+        [InlineKeyboardButton("🌱 Легко", callback_data="diff_0"),
+         InlineKeyboardButton("⚡️ Средне", callback_data="diff_1"),
+         InlineKeyboardButton("🔥 Хардкор", callback_data="diff_2")]
     ]
     await update.message.reply_text("Выбери сложность обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -580,10 +574,14 @@ async def difficulty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     data = query.data
     if data.startswith("diff_"):
-        _, payload = data.split("_", 1)
-        text, diff = payload.rsplit("|", 1)
-        diff = int(diff)
+        diff = int(data.split("_")[1])
         user_id = query.from_user.id
+        text = context.user_data.get('pending_agreement_text')
+        if not text:
+            await query.edit_message_text("❌ Ошибка: текст обещания не найден. Попробуйте снова.")
+            return
+        # Очищаем контекст
+        del context.user_data['pending_agreement_text']
         add_agreement(user_id, text, difficulty=diff)
         diff_names = {0: "Легко", 1: "Средне", 2: "Хардкор"}
         await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{text}\"")
@@ -659,10 +657,13 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
+    # Добавляем шрифт с поддержкой кириллицы (файл DejaVuSans.ttf должен лежать рядом)
     try:
-        pdf.set_font("Helvetica", size=12)
+        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=12)
     except:
-        pass
+        # Если шрифт не найден, используем стандартный (без кириллицы)
+        pdf.set_font("Helvetica", size=12)
     
     pdf.cell(0, 10, "Promise Tracker Report", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
@@ -778,12 +779,14 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     elif payload == "premium_90":
         days = 90
     elif payload == "premium_forever":
-        days = 365 * 10  # 10 лет как "навсегда"
+        days = 365 * 10
+    else:
+        return
     
     set_premium(user_id, True, days=days)
     
     await update.message.reply_text(
-        f"🎉 **Поздравляем! Премиум-доступ активирован на {days} дней!**\n\n"
+        f"🎉 **Поздравляем! Премиум-доступ активирован на {days if days < 3650 else 'все время'} дней!**\n\n"
         f"Теперь тебе доступны все премиум-функции.\n"
         f"Спасибо за поддержку проекта! 🙏",
         parse_mode="Markdown"
@@ -1029,8 +1032,6 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("⛔ У вас нет доступа.")
         return
     stats = get_admin_stats()
-    
-    # Получаем последний фидбек
     recent_feedback = get_recent_feedback(5)
     feedback_text = ""
     if recent_feedback:
@@ -1087,17 +1088,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reward = mark_done(agr_id)
         user_id = query.from_user.id
         
-        if reward:
-            moto_msg = get_motivation_message("task_completed")
-            coins_msg = get_coins_message(reward["coins"])
-            await query.edit_message_text(
-                f"✅ Выполнено: «{reward['text'][:50]}»\n\n"
-                f"{moto_msg}\n"
-                f"{coins_msg}\n"
-                f"✨ +{reward['xp']} опыта"
-            )
-        else:
-            await query.edit_message_text("✅ Отмечено выполненным!")
+        if reward is None:
+            await query.edit_message_text("⚠️ Это обещание уже выполнено или не найдено.")
+            return
+        
+        moto_msg = get_motivation_message("task_completed")
+        coins_msg = get_coins_message(reward["coins"])
+        await query.edit_message_text(
+            f"✅ Выполнено: «{reward['text'][:50]}»\n\n"
+            f"{moto_msg}\n"
+            f"{coins_msg}\n"
+            f"✨ +{reward['xp']} опыта"
+        )
         
         update_pet_stats(user_id, hunger_delta=20, mood_delta=30, performed=True)
         status_emoji, pet_msg = get_pet_message(user_id)
@@ -1296,7 +1298,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("⚠️ Дневной лимит фото исчерпан.")
         del context.user_data['awaiting_photo']
-        del context.user_data['pending_photo_agreement_id']
+        if 'pending_photo_agreement_id' in context.user_data:
+            del context.user_data['pending_photo_agreement_id']
         return
 
     if context.user_data.get('awaiting_category_name'):
@@ -1309,7 +1312,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get('adding_agreement_no_cat'):
         del context.user_data['adding_agreement_no_cat']
-        await show_difficulty_selection(update, text)
+        context.user_data['pending_agreement_text'] = text
+        keyboard = [
+            [InlineKeyboardButton("🌱 Легко", callback_data="diff_0"),
+             InlineKeyboardButton("⚡️ Средне", callback_data="diff_1"),
+             InlineKeyboardButton("🔥 Хардкор", callback_data="diff_2")]
+        ]
+        await update.message.reply_text("Выбери сложность обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if text == "➕ Новое обещание":
@@ -1373,7 +1382,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cancel_command(update, context)
     else:
         if text and not text.startswith('/'):
-            await show_difficulty_selection(update, text)
+            # Обрабатываем как обещание с выбором сложности
+            context.user_data['pending_agreement_text'] = text
+            keyboard = [
+                [InlineKeyboardButton("🌱 Легко", callback_data="diff_0"),
+                 InlineKeyboardButton("⚡️ Средне", callback_data="diff_1"),
+                 InlineKeyboardButton("🔥 Хардкор", callback_data="diff_2")]
+            ]
+            await update.message.reply_text("Выбери сложность обещания:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     if context.bot is None:
@@ -1386,6 +1402,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
 
     create_daily_challenge()
 
+    # Ежедневные напоминания
     users_remind = get_users_with_reminders()
     for user_id, remind_time in users_remind:
         if remind_time == now_time:
@@ -1402,14 +1419,16 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
 
+    # Запланированные напоминания
     pending = get_pending_reminders_for_now(today_msk, now_time)
     for reminder_id, user_id, text in pending:
         try:
             await context.bot.send_message(chat_id=user_id, text=f"🔔 **Напоминание:** {text}", parse_mode="Markdown")
-            delete_scheduled_reminder(reminder_id)
+            delete_scheduled_reminder(reminder_id)  # удаляем одноразовые
         except:
             pass
 
+    # Ежедневная сводка
     users_summary = get_users_with_summary()
     for user_id, summary_time in users_summary:
         if summary_time == now_time:
@@ -1418,8 +1437,9 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
+    # Утренние и вечерние мотиваторы
     if now_time == "09:00":
-        for user_id, _ in users_remind[:10]:
+        for user_id, _ in get_users_with_reminders()[:10]:  # временная заглушка
             if random.random() < 0.3:
                 try:
                     msg = random.choice(MOTIVATIONAL_MESSAGES["morning_greetings"])
@@ -1428,7 +1448,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                     pass
 
     if now_time == "21:00":
-        for user_id, _ in users_remind[:10]:
+        for user_id, _ in get_users_with_reminders()[:10]:
             if random.random() < 0.2:
                 try:
                     msg = random.choice(MOTIVATIONAL_MESSAGES["evening_encouragement"])
@@ -1436,12 +1456,13 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
+    # Потеря уровня питомца для неактивных (оптимизировать позже)
     if now_time == "03:00":
-        for user in db.users.find():
-            uid = user["user_id"]
-            if lose_level_if_inactive(uid):
+        # Временно проверяем только пользователей с напоминаниями, чтобы не нагружать
+        for user_id, _ in get_users_with_reminders()[:50]:
+            if lose_level_if_inactive(user_id):
                 try:
-                    await context.bot.send_message(chat_id=uid, text="⚠️ Твой питомец потерял уровень из-за долгого отсутствия!")
+                    await context.bot.send_message(chat_id=user_id, text="⚠️ Твой питомец потерял уровень из-за долгого отсутствия!")
                 except:
                     pass
 

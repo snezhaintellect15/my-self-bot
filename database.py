@@ -2,7 +2,7 @@ import os
 import uuid
 import random
 from datetime import datetime, date, timedelta
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
 
 MONGODB_URI = os.environ.get("MONGODB_URI")
@@ -62,19 +62,24 @@ def update_pet_stats(user_id: int, hunger_delta: int = 0, mood_delta: int = 0, p
     pet["hunger"] = max(0, min(200, pet["hunger"] + hunger_delta))
     pet["mood"] = max(0, min(200, pet["mood"] + mood_delta))
 
+    # Болезнь при низком настроении
     if pet["mood"] < 30:
         pet["is_sick"] = True
-    else:
-        if performed:
-            pet["consecutive_done"] += 1
-            if pet["consecutive_done"] >= 3:
-                pet["is_sick"] = False
-                pet["consecutive_done"] = 0
-                pet["mood"] = max(pet["mood"], 50)
-        else:
-            pet["consecutive_done"] = 0
+    # Выздоровление при поднятии настроения
+    elif pet["mood"] >= 50 and pet.get("is_sick", False):
+        pet["is_sick"] = False
+        pet["consecutive_done"] = 0
 
-    if not pet["is_sick"]:
+    if performed:
+        pet["consecutive_done"] += 1
+        if pet["consecutive_done"] >= 3 and pet.get("is_sick", False):
+            pet["is_sick"] = False
+            pet["consecutive_done"] = 0
+            pet["mood"] = max(pet["mood"], 50)
+    else:
+        pet["consecutive_done"] = 0
+
+    if not pet.get("is_sick", False):
         pet["xp"] += abs(hunger_delta) // 2
         if pet["xp"] >= 100:
             pet["level"] += 1
@@ -115,6 +120,10 @@ def get_pet_message(user_id: int):
     return status_emoji, f"{status_emoji} {random.choice(msg_list)}"
 
 def lose_level_if_inactive(user_id: int):
+    """
+    Проверка одного пользователя (вызывается по крону).
+    В будущем оптимизировать: вместо перебора всех пользователей делать агрегацию.
+    """
     pet = get_pet(user_id)
     last_done = db.agreements.find_one(
         {"user_id": user_id, "is_done": True},
@@ -214,12 +223,18 @@ def get_inventory(user_id: int):
 
 # ---------- Пользователи ----------
 def init_db():
+    # Индексы для пользователей
     db.users.create_index("user_id", unique=True)
     db.users.create_index("ref_code")
+    # Индексы для обещаний
     db.agreements.create_index("user_id")
+    db.agreements.create_index([("user_id", ASCENDING), ("is_done", ASCENDING), ("done_at", DESCENDING)])
     db.agreements.create_index("is_done")
+    # Индексы для категорий
     db.categories.create_index("user_id")
-    # Создаем коллекцию для фидбека если её нет
+    # Индексы для напоминаний
+    db.scheduled_reminders.create_index([("remind_date", ASCENDING), ("remind_time", ASCENDING), ("is_recurring", ASCENDING)])
+    # Коллекции
     if "feedback" not in db.list_collection_names():
         db.create_collection("feedback")
     if "polls" not in db.list_collection_names():
@@ -366,24 +381,32 @@ def update_agreement(agreement_id: str, new_text: str):
     db.agreements.update_one({"_id": oid}, {"$set": {"text": new_text}})
 
 def mark_done(agreement_id: str, photo_file_id: str = None):
+    """
+    Отмечает обещание выполненным. Если уже выполнено, возвращает None.
+    Возвращает словарь с наградой или None.
+    """
     try:
         oid = ObjectId(agreement_id)
     except:
         return None
+    agreement = db.agreements.find_one({"_id": oid})
+    if not agreement:
+        return None
+    if agreement.get("is_done", False):
+        return None  # уже выполнено
+
     update = {"is_done": True, "done_at": datetime.utcnow()}
     if photo_file_id:
         update["photo_file_id"] = photo_file_id
     db.agreements.update_one({"_id": oid}, {"$set": update})
-    agreement = db.agreements.find_one({"_id": oid})
-    if agreement:
-        xp_map = {0: 10, 1: 25, 2: 50}
-        diff = agreement.get("difficulty", 0)
-        xp_amount = xp_map.get(diff, 10)
-        coin_amount = 10
-        add_xp(agreement["user_id"], xp_amount)
-        add_coins(agreement["user_id"], coin_amount)
-        return {"xp": xp_amount, "coins": coin_amount, "text": agreement["text"]}
-    return None
+
+    xp_map = {0: 10, 1: 25, 2: 50}
+    diff = agreement.get("difficulty", 0)
+    xp_amount = xp_map.get(diff, 10)
+    coin_amount = 10
+    add_xp(agreement["user_id"], xp_amount)
+    add_coins(agreement["user_id"], coin_amount)
+    return {"xp": xp_amount, "coins": coin_amount, "text": agreement["text"]}
 
 def delete_agreement(agreement_id: str):
     try:
@@ -542,9 +565,10 @@ def get_stats(user_id: int):
     done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done / total * 100, 1) if total > 0 else 0.0
 
+    # Используем done_at для подсчёта серии
     pipeline = [
         {"$match": {"user_id": user_id, "is_done": True}},
-        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}}},
+        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$done_at"}}}},
         {"$sort": {"_id": -1}},
         {"$limit": 365}
     ]
@@ -621,7 +645,16 @@ def check_achievements(user_id: int):
 
 # ---------- Запланированные напоминания ----------
 def count_scheduled_reminders(user_id: int) -> int:
-    return db.scheduled_reminders.count_documents({"user_id": user_id})
+    # Считаем только будущие напоминания
+    today = date.today().isoformat()
+    return db.scheduled_reminders.count_documents({
+        "user_id": user_id,
+        "remind_date": {"$gte": today},
+        "is_recurring": False
+    }) + db.scheduled_reminders.count_documents({
+        "user_id": user_id,
+        "is_recurring": True
+    })
 
 def create_scheduled_reminder(user_id: int, agreement_id, remind_date, remind_time,
                               is_recurring: bool = False, recurring_day: int = None):
