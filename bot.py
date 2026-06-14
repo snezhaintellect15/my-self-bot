@@ -1531,20 +1531,15 @@ def main():
     if application.job_queue:
         application.job_queue.run_repeating(check_scheduled_jobs, interval=60, first=10)
 
-    # Запускаем поллинг бота в отдельном потоке
-    def run_bot_polling():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
-
-    bot_thread = Thread(target=run_bot_polling)
-    bot_thread.daemon = True
-    bot_thread.start()
-    logging.info("Бот запущен в фоновом потоке")
-
-    # Flask-сервер в главном потоке
+    # Запускаем Flask в отдельном потоке (фоновый), чтобы Render видел открытый порт
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True)
+    flask_thread.start()
+    logging.info("Flask health-check запущен в фоне")
+
+    # Бот работает в главном потоке (обработка сигналов корректна)
+    logging.info("Бот запущен в главном потоке")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
