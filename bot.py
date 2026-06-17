@@ -159,7 +159,8 @@ MONTHS_RU = {
 def parse_natural_language(text: str):
     text_lower = text.lower()
     today = date.today()
-    now = datetime.now()
+    # ИСПРАВЛЕНО: берём московское время
+    now = datetime.now(timezone.utc) + MSK_OFFSET
     remind_date = today
     remind_time = "09:00"
     task_text = text
@@ -449,6 +450,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("🪙 Баланс"), KeyboardButton("🤖 Напомнить")],
         [KeyboardButton("💬 Фидбек"), KeyboardButton("❌ Отмена")]
     ]
+    # Добавляем VIP-помощь для премиум-пользователей
+    if is_premium(update.effective_user.id):
+        keyboard.append([KeyboardButton("👑 VIP-помощь")])
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,9 +565,49 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/invite — Реферальная ссылка\n"
         "/feedback — Написать идею/проблему\n"
         "/premium — Премиум-доступ\n"
-        "/cancel — Отменить операцию"
+        "/cancel — Отменить операцию\n"
     )
+    if is_premium(update.effective_user.id):
+        help_text += "\n👑 **Премиум:**\n/viphelp — Приоритетная поддержка"
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def vip_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приоритетная поддержка для премиум-пользователей."""
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        await update.message.reply_text("❌ Эта команда доступна только премиум-пользователям.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "👑 **VIP-поддержка**\n\n"
+            "Опишите вашу проблему или вопрос после команды /viphelp.\n"
+            "Пример: `/viphelp Не могу сменить питомца`\n\n"
+            "Ваше сообщение будет помечено как приоритетное и передано разработчику."
+        )
+        return
+
+    vip_text = " ".join(context.args)
+    username = update.effective_user.username or "без юзернейма"
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"👑 **VIP‑запрос (премиум)**\n\n"
+                     f"От: @{username}\n"
+                     f"ID: `{user_id}`\n"
+                     f"Текст: {escape_markdown(vip_text, version=2)}",
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(
+                "✅ Ваше сообщение отправлено разработчику с высоким приоритетом. "
+                "Ожидайте ответа в ближайшее время."
+            )
+        except Exception as e:
+            logging.error(f"Ошибка VIP-уведомления: {e}")
+            await update.message.reply_text("❌ Произошла ошибка, попробуйте позже.")
+    else:
+        await update.message.reply_text("❌ Администратор пока не настроен.")
 
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -706,37 +750,119 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
     except:
         pdf.set_font("Helvetica", size=12)
 
-    pdf.cell(0, 10, "Отчёт Promise Tracker", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.ln(5)
-    pdf.cell(0, 10, f"Создан: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(10)
+    # Заголовок
+    pdf.set_font_size(18)
+    pdf.set_text_color(0, 51, 102)
+    pdf.cell(0, 12, "Отчёт Promise Tracker", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font_size(10)
+    pdf.cell(0, 8, f"Создан: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(6)
 
+    # Общая статистика
     pdf.set_font_size(14)
-    pdf.cell(0, 10, "Общая статистика", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_fill_color(230, 240, 255)
+    pdf.cell(0, 10, "Общая статистика", new_x="LMARGIN", new_y="NEXT", fill=True)
     pdf.set_font_size(12)
     pdf.cell(0, 8, f"Всего обещаний: {stats['total']}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Выполнено: {stats['done']} ({stats['percent']}%)", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Дней подряд: {stats['streak']}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(5)
+    pdf.ln(4)
 
+    # По категориям
     if cat_stats:
         pdf.set_font_size(14)
-        pdf.cell(0, 10, "По категориям", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_fill_color(230, 240, 255)
+        pdf.cell(0, 10, "По категориям", new_x="LMARGIN", new_y="NEXT", fill=True)
         pdf.set_font_size(12)
         for cat in cat_stats:
             pdf.cell(0, 8, f"{cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
+        pdf.ln(4)
 
-    pdf.set_font_size(14)
-    pdf.cell(0, 10, "Все обещания", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font_size(10)
+    # Разделяем обещания
+    done_agreements = [a for a in agreements if a.get("is_done")]
+    active_agreements = [a for a in agreements if not a.get("is_done")]
 
-    for agr in agreements[:50]:
-        status = "[✅ Выполнено]" if agr["is_done"] else "[⬜ Ожидает]"
-        cat = agr.get("category_name") or "Без категории"
-        created = agr["created_at"].strftime("%Y-%m-%d") if isinstance(agr["created_at"], datetime) else str(agr["created_at"])
-        text = agr["text"][:60] + ("..." if len(agr["text"]) > 60 else "")
-        pdf.cell(0, 6, f"{status} {text} [{cat}] {created}", new_x="LMARGIN", new_y="NEXT")
+    def print_agreement_list(title, agreements_list, header_color):
+        if not agreements_list:
+            return
+        pdf.set_font_size(14)
+        pdf.set_fill_color(*header_color)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT", fill=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font_size(10)
+        # Шапка таблицы
+        pdf.set_fill_color(245, 245, 245)
+        pdf.cell(60, 7, "Текст", border=1, fill=True)
+        pdf.cell(35, 7, "Создано", border=1, fill=True)
+        pdf.cell(35, 7, "Выполнено", border=1, fill=True)
+        pdf.cell(30, 7, "Категория", border=1, fill=True)
+        pdf.ln()
+        for agr in agreements_list[:100]:
+            text = agr["text"][:50] + ("..." if len(agr["text"]) > 50 else "")
+            created = agr["created_at"].strftime("%d.%m.%y") if isinstance(agr.get("created_at"), datetime) else str(agr.get("created_at", ""))
+            done_date = ""
+            if agr.get("is_done") and agr.get("done_at"):
+                done_date = agr["done_at"].strftime("%d.%m.%y") if isinstance(agr["done_at"], datetime) else str(agr["done_at"])
+            cat = agr.get("category_name") or "—"
+            pdf.cell(60, 7, text, border=1)
+            pdf.cell(35, 7, created, border=1)
+            pdf.cell(35, 7, done_date, border=1)
+            pdf.cell(30, 7, cat, border=1)
+            pdf.ln()
+        pdf.ln(4)
+
+    # Выводим выполненные (зелёный)
+    print_agreement_list("✅ Выполненные обещания", done_agreements, (0, 128, 0))
+    # Активные (оранжевый)
+    print_agreement_list("⬜ Активные обещания", active_agreements, (200, 80, 0))
+
+    # --- График продуктивности по дням (только для премиум) ---
+    # Рисуем столбчатую диаграмму за последние 7 дней
+    try:
+        today = date.today()
+        days = []
+        counts = []
+        for i in range(6, -1, -1):
+            d = today - timedelta(days=i)
+            cnt = db.agreements.count_documents({
+                "user_id": user_id,
+                "is_done": True,
+                "done_at": {
+                    "$gte": datetime(d.year, d.month, d.day),
+                    "$lt": datetime(d.year, d.month, d.day) + timedelta(days=1)
+                }
+            })
+            days.append(d.strftime("%d.%m"))
+            counts.append(cnt)
+
+        pdf.add_page()
+        pdf.set_font_size(16)
+        pdf.set_text_color(0, 51, 102)
+        pdf.cell(0, 10, "Продуктивность за 7 дней", new_x="LMARGIN", new_y="NEXT", align="C")
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+
+        max_count = max(counts) if counts else 1
+        bar_width = 20
+        chart_x = 30
+        chart_y = pdf.get_y()
+        max_bar_height = 60
+        pdf.set_fill_color(100, 180, 255)
+        pdf.set_draw_color(0, 0, 0)
+        for i, cnt in enumerate(counts):
+            h = (cnt / max_count) * max_bar_height if max_count > 0 else 0
+            x = chart_x + i * (bar_width + 8)
+            pdf.rect(x, chart_y + max_bar_height - h, bar_width, h, style="DF")
+            pdf.set_xy(x, chart_y + max_bar_height + 2)
+            pdf.set_font_size(8)
+            pdf.cell(bar_width, 5, days[i], align="C")
+            pdf.set_xy(x, chart_y + max_bar_height - h - 7)
+            pdf.cell(bar_width, 5, str(cnt), align="C")
+        pdf.ln(max_bar_height + 12)
+    except Exception as e:
+        logging.error(f"Не удалось построить график: {e}")
 
     return pdf.output()
 
@@ -802,11 +928,11 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Твой статус: {status_text}\n\n"
         f"**Что даёт премиум:**\n"
         f"• Безлимитные напоминания\n"
-        f"• Экспорт в PDF с графиками\n"
+        f"• Экспорт в PDF с графиком продуктивности\n"
         f"• Безлимитные фото-подтверждения\n"
-        f"• Заморозка дня (сохраняет серию)\n"
-        f"• Дракончик-питомец\n"
-        f"• Приоритетная поддержка\n\n"
+        f"• 3 заморозки дня (сохраняют серию)\n"
+        f"• Эксклюзивный питомец «Феникс»\n"
+        f"• Приоритетная поддержка (/viphelp)\n\n"
         f"💎 **Цены:**\n"
         f"• 30 дней — 50 Telegram Stars\n"
         f"• 90 дней — 125 Stars (скидка 15%)\n"
@@ -1023,6 +1149,8 @@ async def pet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for pet_type, info in PET_TYPES.items():
+        if info["premium"] and not is_premium(update.effective_user.id):
+            continue  # скрываем премиум-питомцев от бесплатных пользователей
         if info["premium"]:
             cost_text = "Только премиум"
         else:
@@ -1284,6 +1412,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "changepet_start":
         keyboard = []
         for pet_type, info in PET_TYPES.items():
+            if info["premium"] and not is_premium(query.from_user.id):
+                continue
             if info["premium"]:
                 cost_text = "Только премиум"
             else:
@@ -1299,7 +1429,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         info = PET_TYPES[pet_type]
         if info["premium"] and not is_premium(user_id):
-            await query.edit_message_text("❌ Дракончик только для премиум.")
+            await query.edit_message_text("❌ Этот питомец только для премиум.")
             return
         cost = info["cost"]
         if cost > 0:
@@ -1475,6 +1605,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пример: `/feedback Хочу больше мотивации!`\n\n"
             "За полезные идеи дарим монеты! 🎁"
         )
+    elif text == "👑 VIP-помощь":
+        # Показываем подсказку по использованию
+        await update.message.reply_text(
+            "👑 **VIP-поддержка (премиум)**\n\n"
+            "Опишите вашу проблему после команды /viphelp.\n"
+            "Пример: `/viphelp Не могу сменить питомца`"
+        )
     elif text == "❌ Отмена":
         await cancel_command(update, context)
     else:
@@ -1593,6 +1730,7 @@ def main():
     application.add_handler(CommandHandler("share", share_achievement))
     application.add_handler(CommandHandler("admin", admin_stats_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("viphelp", vip_help))
 
     # Платежи
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))

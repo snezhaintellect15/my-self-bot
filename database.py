@@ -43,6 +43,17 @@ PET_TYPES = {
             "excellent": ["😎 Я в отличной форме!", "🔥 Драконий огонь!"],
             "sick": ["🤒 Я заболел... Мне нужно больше заботы!", "Ррр... моя чешуя тускнеет..."]
         }
+    },
+    "phoenix": {
+        "name": "Феникс", "emoji": "🦅", "cost": 0, "premium": True,
+        "evolution": {1: "🥚", 2: "🐣", 3: "🐤", 5: "🦅", 10: "🔥"},
+        "mood_messages": {
+            "happy": ["Чирик! День прекрасен!", "Мои перья сияют, спасибо!", "Феникс счастлив!"],
+            "sad": ["Чирик... я потускнел...", "Мне нужно больше тепла...", "Феникс печален..."],
+            "danger": ["💀 Я угасаю...", "Чирик! Огонь почти погас!"],
+            "excellent": ["😎 Я пылаю силой!", "🔥 Пламя бессмертия со мной!"],
+            "sick": ["🤒 Я заболел... Мне нужен уход!", "Чирик... огонь внутри меня слабеет..."]
+        }
     }
 }
 
@@ -120,10 +131,6 @@ def get_pet_message(user_id: int):
     return status_emoji, f"{status_emoji} {random.choice(msg_list)}"
 
 def lose_level_if_inactive(user_id: int):
-    """
-    Проверка одного пользователя (вызывается по крону).
-    В будущем оптимизировать: вместо перебора всех пользователей делать агрегацию.
-    """
     pet = get_pet(user_id)
     last_done = db.agreements.find_one(
         {"user_id": user_id, "is_done": True},
@@ -143,12 +150,14 @@ def get_pet_ascii_art(pet_type: str, level: int, mood: int, is_sick: bool = Fals
         "cat": ["  /\\_/\\  ", " ( o.o ) ", "  > ^ <  "],
         "dog": ["  / \\__  ", " (    @\\___ ", " /         O ", "/   (_____ / "],
         "dragon": ["      ,,,  ", "     (o o) ", "---ooO-(_)-Ooo---"],
+        "phoenix": ["     ^    ", "    (o o) ", "   /  V  \\", "  /   °   \\", " /_________\\"],
     }
     if is_sick:
         sad_arts = {
             "cat": ["  /\\_/\\  ", " ( x.x ) ", "  > - <  "],
             "dog": ["  / \\__  ", " (    @\\___ ", " /    o    O ", "/   (___) / "],
             "dragon": ["      ,,,  ", "     (x x) ", "---ooO-(_)-Ooo---"],
+            "phoenix": ["     ^    ", "    (x x) ", "   /  V  \\", "  /   °   \\", " /_________\\"],
         }
         art = sad_arts.get(pet_type, sad_arts["cat"])
     elif mood < 50:
@@ -156,6 +165,7 @@ def get_pet_ascii_art(pet_type: str, level: int, mood: int, is_sick: bool = Fals
             "cat": ["  /\\_/\\  ", " ( -.- ) ", "  > ^ <  "],
             "dog": ["  / \\__  ", " (    @\\___ ", " /    -    O ", "/   (___) / "],
             "dragon": ["      ,,,  ", "     (- -) ", "---ooO-(_)-Ooo---"],
+            "phoenix": ["     ^    ", "    (- -) ", "   /  V  \\", "  /   °   \\", " /_________\\"],
         }
         art = sad_arts.get(pet_type, sad_arts["cat"])
     else:
@@ -171,6 +181,9 @@ def change_pet(user_id: int, new_type: str, cost_xp: int = 0, cost_coins: int = 
         return False
     user = db.users.find_one({"user_id": user_id})
     if not user:
+        return False
+    # Дополнительная проверка: премиум-питомцы требуют премиума
+    if PET_TYPES[new_type]["premium"] and not (user.get("is_premium") and user.get("premium_until") and user["premium_until"] > datetime.utcnow()):
         return False
     if cost_xp > 0:
         current_xp = user.get("xp", 0)
@@ -279,9 +292,10 @@ def is_premium(user_id: int) -> bool:
 def set_premium(user_id: int, status: bool, days: int = 0):
     if days > 0:
         premium_until = datetime.utcnow() + timedelta(days=days)
+        # При активации премиума выдаём 3 заморозки
         db.users.update_one(
             {"user_id": user_id},
-            {"$set": {"is_premium": True, "premium_until": premium_until, "freezes_available": 1}},
+            {"$set": {"is_premium": True, "premium_until": premium_until, "freezes_available": 3}},
             upsert=True
         )
     else:
@@ -381,10 +395,6 @@ def update_agreement(agreement_id: str, new_text: str):
     db.agreements.update_one({"_id": oid}, {"$set": {"text": new_text}})
 
 def mark_done(agreement_id: str, photo_file_id: str = None):
-    """
-    Отмечает обещание выполненным. Если уже выполнено, возвращает None.
-    Возвращает словарь с наградой или None.
-    """
     try:
         oid = ObjectId(agreement_id)
     except:
