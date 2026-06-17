@@ -46,6 +46,10 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "MyPromiseTrackerBot")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 MSK_OFFSET = timedelta(hours=3)
 
+# Реквизиты для донатов берутся из переменных окружения (безопасно)
+DONATION_YOOMONEY = os.environ.get("DONATION_YOOMONEY", "")
+DONATION_CARD = os.environ.get("DONATION_CARD", "")
+
 app = Flask(__name__)
 
 @app.route('/')
@@ -289,7 +293,6 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
     for agr in agreements:
         if agr.get("is_freeze"):
             continue
-        # Экранируем текст обещания для Markdown
         safe_text = escape_markdown(agr["text"], version=2)
         is_done = agr["is_done"]
         cat_name = agr.get("category_name")
@@ -422,7 +425,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     level = xp // 100 + 1
     coins = get_coins(user_id)
 
-    # Без parse_mode, чтобы избежать ошибок разметки
     welcome_text = (
         f"👋 Привет, {username or 'друг'}! Я твой персональный трекер обещаний.\n\n"
         "✨ Что я умею:\n"
@@ -461,8 +463,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"📊 Всего пользователей: {user_count}\n"
                      f"👥 Реферал: {'да' if referrer_id else 'нет'}"
             )
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Не удалось уведомить админа о новом пользователе: {e}")
 
     await menu(update, context)
 
@@ -539,7 +541,6 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if ADMIN_ID:
         try:
-            # Экранируем фидбек, чтобы не сломать Markdown
             safe_fb = escape_markdown(feedback_text, version=2)
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
@@ -549,8 +550,8 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"Текст: {safe_fb}",
                 parse_mode="Markdown"
             )
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Не удалось уведомить админа о фидбеке: {e}")
 
     await update.message.reply_text(
         "🙏 Спасибо за обратную связь! Я передал её разработчику.\n"
@@ -724,17 +725,32 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_premium(user_id):
         cat_stats = get_stats_by_category(user_id)
-        pdf_bytes = generate_pdf(user_id, stats, cat_stats, data)
-        await update.message.reply_document(
-            document=pdf_bytes,
-            filename="promise_tracker_report.pdf",
-            caption="📎 Ваш PDF-отчёт"
-        )
+        try:
+            pdf_bytes = generate_pdf(user_id, stats, cat_stats, data)
+            await update.message.reply_document(
+                document=pdf_bytes,
+                filename="promise_tracker_report.pdf",
+                caption="📎 Ваш PDF-отчёт"
+            )
+        except Exception as e:
+            logging.error(f"Ошибка генерации PDF: {e}")
+            await update.message.reply_text(f"❌ Не удалось создать PDF: {e}")
 
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
     status_text = "активен ✅" if premium else "неактивен ❌"
+
+    # Формируем строку с донатами, если они заданы
+    donation_lines = []
+    if DONATION_YOOMONEY:
+        donation_lines.append(f"💳 ЮMoney: {DONATION_YOOMONEY}")
+    if DONATION_CARD:
+        donation_lines.append(f"🏦 Т‑Банк: {DONATION_CARD}")
+    if not donation_lines:
+        donation_lines.append("Пока реквизиты не добавлены. Напишите разработчику.")
+
+    donation_text = "\n".join(donation_lines)
 
     message = (
         f"⭐ **Премиум-доступ**\n\n"
@@ -753,8 +769,7 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 **Получить БЕСПЛАТНО:**\n"
         f"Пригласи друга по ссылке /invite\n\n"
         f"☕ **Поддержать донатом:**\n"
-        f"ЮMoney: 410011234567890\n"
-        f"T-Банк: 5536 9134 5678 9012"
+        f"{donation_text}"
     )
 
     keyboard = [
@@ -1269,15 +1284,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif data == "donate_info":
-        await query.edit_message_text(
-            "☕ **Поддержать проект**\n\n"
-            "Если бот помогает вам быть продуктивнее, вы можете поддержать его развитие:\n\n"
-            "💳 **ЮMoney:** 410011234567890\n"
-            "🏦 **Т-Банк:** 5536 9134 5678 9012\n"
-            "⭐ **Telegram Stars:** через кнопки выше\n\n"
-            "Спасибо, что помогаете боту расти! 🙏",
-            parse_mode="Markdown"
-        )
+        donation_msg = "☕ **Поддержать проект**\n\n"
+        if DONATION_YOOMONEY:
+            donation_msg += f"💳 ЮMoney: {DONATION_YOOMONEY}\n"
+        if DONATION_CARD:
+            donation_msg += f"🏦 Т‑Банк: {DONATION_CARD}\n"
+        if not DONATION_YOOMONEY and not DONATION_CARD:
+            donation_msg += "Пока реквизиты не добавлены. Свяжитесь с разработчиком.\n"
+        donation_msg += "\n⭐ **Telegram Stars:** через кнопки выше\n"
+        donation_msg += "Спасибо, что помогаете боту расти! 🙏"
+        await query.edit_message_text(donation_msg, parse_mode="Markdown")
         return
 
     elif data.startswith("premium_"):
@@ -1298,6 +1314,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title="Promise Tracker Premium",
             description=f"Премиум-доступ на {days if days < 3650 else 'все время'} дней",
             payload=data,
+            provider_token="",   # Обязательно для Telegram Stars
             currency="XTR",
             prices=[LabeledPrice("Premium", stars_cost)],
             start_parameter="premium_subscription"
