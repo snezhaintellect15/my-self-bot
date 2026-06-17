@@ -450,7 +450,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("🪙 Баланс"), KeyboardButton("🤖 Напомнить")],
         [KeyboardButton("💬 Фидбек"), KeyboardButton("❌ Отмена")]
     ]
-    # Добавляем VIP-помощь для премиум-пользователей
     if is_premium(update.effective_user.id):
         keyboard.append([KeyboardButton("👑 VIP-помощь")])
     await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
@@ -572,7 +571,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def vip_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приоритетная поддержка для премиум-пользователей."""
     user_id = update.effective_user.id
     if not is_premium(user_id):
         await update.message.reply_text("❌ Эта команда доступна только премиум-пользователям.")
@@ -819,7 +817,6 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
     print_agreement_list("⬜ Активные обещания", active_agreements, (200, 80, 0))
 
     # --- График продуктивности по дням (только для премиум) ---
-    # Рисуем столбчатую диаграмму за последние 7 дней
     try:
         today = date.today()
         days = []
@@ -915,8 +912,9 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     donation_message = ""
     if yoo_money or card_number:
-        donation_message = "\n☕ **Поддержать донатом:**\n"
-         "💰 Цены в рублях:\n"
+        donation_message = (
+            "\n☕ **Поддержать донатом:**\n"
+            "💰 Цены в рублях:\n"
             "• 30 дней — 200 ₽\n"
             "• 90 дней — 450 ₽\n"
             "• Навсегда — 2000 ₽\n\n"
@@ -1157,7 +1155,7 @@ async def changepet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for pet_type, info in PET_TYPES.items():
         if info["premium"] and not is_premium(update.effective_user.id):
-            continue  # скрываем премиум-питомцев от бесплатных пользователей
+            continue
         if info["premium"]:
             cost_text = "Только премиум"
         else:
@@ -1613,7 +1611,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "За полезные идеи дарим монеты! 🎁"
         )
     elif text == "👑 VIP-помощь":
-        # Показываем подсказку по использованию
         await update.message.reply_text(
             "👑 **VIP-поддержка (премиум)**\n\n"
             "Опишите вашу проблему после команды /viphelp.\n"
@@ -1764,3 +1761,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+         
