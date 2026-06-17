@@ -191,43 +191,60 @@ def parse_natural_language(text: str):
             task_text = "Напоминание"
         return remind_date, remind_time, task_text, False, None
 
-    # --- Абсолютное время ---
-    time_patterns = [
-        r'(\d{1,2}):(\d{2})',
-        r'в (\d{1,2})\s*часов?\s*(\d{1,2})?\s*минут?',
-        r'в (\d{1,2})(?:\s*часов?)?',
-        r'(\d{1,2})\s*утра',
-        r'(\d{1,2})\s*дня',
-        r'(\d{1,2})\s*вечера',
-    ]
+    # --- Абсолютное время (исправлено, без IndexError) ---
+    time_match = None
 
-    for pattern in time_patterns:
-        match = re.search(pattern, text_lower)
+    # 1) "HH:MM"
+    match = re.search(r'(\d{1,2}):(\d{2})', text_lower)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        remind_time = f"{hour:02d}:{minute:02d}"
+        time_match = True
+
+    # 2) "в X часов Y минут" или "в X часов"
+    if not time_match:
+        match = re.search(r'в (\d{1,2})\s*часов?\s*(?:(\d{1,2})\s*минут?)?', text_lower)
         if match:
-            if ':' in pattern:
-                hour = int(match.group(1))
-                minute = int(match.group(2))
-            elif 'утра' in pattern:
-                hour = int(match.group(1))
-                minute = 0
-                if hour == 12:
-                    hour = 0
-            elif 'дня' in pattern:
-                hour = int(match.group(1))
-                minute = 0
-                if hour < 12:
-                    hour += 12
-            elif 'вечера' in pattern:
-                hour = int(match.group(1))
-                minute = 0
-                if hour < 12:
-                    hour += 12
-            else:
-                hour = int(match.group(1))
-                minute = int(match.group(2)) if match.group(2) else 0
+            hour = int(match.group(1))
+            minute = int(match.group(2)) if match.lastindex and match.lastindex >= 2 and match.group(2) else 0
             remind_time = f"{hour:02d}:{minute:02d}"
-            break
+            time_match = True
 
+    # 3) "X утра"
+    if not time_match:
+        match = re.search(r'(\d{1,2})\s*утра', text_lower)
+        if match:
+            hour = int(match.group(1))
+            if hour == 12:
+                hour = 0
+            minute = 0
+            remind_time = f"{hour:02d}:{minute:02d}"
+            time_match = True
+
+    # 4) "X дня"
+    if not time_match:
+        match = re.search(r'(\d{1,2})\s*дня', text_lower)
+        if match:
+            hour = int(match.group(1))
+            if hour < 12:
+                hour += 12
+            minute = 0
+            remind_time = f"{hour:02d}:{minute:02d}"
+            time_match = True
+
+    # 5) "X вечера"
+    if not time_match:
+        match = re.search(r'(\d{1,2})\s*вечера', text_lower)
+        if match:
+            hour = int(match.group(1))
+            if hour < 12:
+                hour += 12
+            minute = 0
+            remind_time = f"{hour:02d}:{minute:02d}"
+            time_match = True
+
+    # --- Дни недели и повторения ---
     for day_name, day_num in DAYS_RU.items():
         if day_name in text_lower:
             if re.search(r'(каждый|каждую)\s+' + day_name, text_lower):
@@ -235,6 +252,7 @@ def parse_natural_language(text: str):
                 recurring_day = day_num
                 task_text = re.sub(r'(каждый|каждую)\s+' + day_name + r'\s*', '', text, flags=re.IGNORECASE)
 
+    # --- Относительные даты (завтра, послезавтра, сегодня) ---
     if 'послезавтра' in text_lower:
         remind_date = today + timedelta(days=2)
         task_text = re.sub(r'послезавтра\s*', '', text, flags=re.IGNORECASE)
@@ -245,6 +263,7 @@ def parse_natural_language(text: str):
         remind_date = today
         task_text = re.sub(r'сегодня\s*', '', text, flags=re.IGNORECASE)
 
+    # --- Абсолютные даты ("15 мая") ---
     date_match = re.search(r'(\d{1,2})\s+(\w+)', text_lower)
     if date_match and not is_recurring:
         day = int(date_match.group(1))
@@ -260,6 +279,7 @@ def parse_natural_language(text: str):
             except:
                 pass
 
+    # --- Если дата не задана, пробуем понять по дням недели ---
     if not remind_date and not is_recurring:
         for day_name, day_num in DAYS_RU.items():
             if day_name in text_lower:
@@ -270,6 +290,7 @@ def parse_natural_language(text: str):
                 task_text = re.sub(day_name + r'\s*', '', text, flags=re.IGNORECASE)
                 break
 
+    # --- Очистка оставшихся служебных слов ---
     markers = ['напомни', 'сделать', 'купить', 'позвонить', 'напомнить', 'в ']
     for marker in markers:
         task_text = re.sub(r'^' + marker + r'\s*', '', task_text, flags=re.IGNORECASE)
@@ -685,34 +706,34 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
     except:
         pdf.set_font("Helvetica", size=12)
 
-    pdf.cell(0, 10, "Promise Tracker Report", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 10, "Отчёт Promise Tracker", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
-    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"Создан: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
 
     pdf.set_font_size(14)
-    pdf.cell(0, 10, "Overall Statistics", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, "Общая статистика", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font_size(12)
-    pdf.cell(0, 8, f"Total promises: {stats['total']}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 8, f"Completed: {stats['done']} ({stats['percent']}%)", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 8, f"Current streak: {stats['streak']} days", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Всего обещаний: {stats['total']}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Выполнено: {stats['done']} ({stats['percent']}%)", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Дней подряд: {stats['streak']}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
     if cat_stats:
         pdf.set_font_size(14)
-        pdf.cell(0, 10, "By Category", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 10, "По категориям", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font_size(12)
         for cat in cat_stats:
             pdf.cell(0, 8, f"{cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(5)
 
     pdf.set_font_size(14)
-    pdf.cell(0, 10, "All Promises", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, "Все обещания", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font_size(10)
 
     for agr in agreements[:50]:
-        status = "[DONE]" if agr["is_done"] else "[PENDING]"
-        cat = agr.get("category_name", "") or "None"
+        status = "[✅ Выполнено]" if agr["is_done"] else "[⬜ Ожидает]"
+        cat = agr.get("category_name") or "Без категории"
         created = agr["created_at"].strftime("%Y-%m-%d") if isinstance(agr["created_at"], datetime) else str(agr["created_at"])
         text = agr["text"][:60] + ("..." if len(agr["text"]) > 60 else "")
         pdf.cell(0, 6, f"{status} {text} [{cat}] {created}", new_x="LMARGIN", new_y="NEXT")
