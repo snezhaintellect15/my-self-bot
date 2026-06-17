@@ -3,12 +3,13 @@ import logging
 import os
 import re
 import random
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from threading import Thread
 
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, PreCheckoutQueryHandler
+from telegram.helpers import escape_markdown
 
 from database import (init_db, create_user, is_premium, set_premium,
                       add_agreement, get_agreements, get_agreement_by_id,
@@ -288,14 +289,15 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
     for agr in agreements:
         if agr.get("is_freeze"):
             continue
-        text = agr["text"]
+        # Экранируем текст обещания для Markdown
+        safe_text = escape_markdown(agr["text"], version=2)
         is_done = agr["is_done"]
         cat_name = agr.get("category_name")
         agr_id = str(agr["_id"])
         diff = agr.get("difficulty", 0)
         prefix = diff_icons.get(diff, "")
         photo_mark = " 📷" if agr.get("photo_file_id") else ""
-        display_text = f"{prefix} {text}{photo_mark}"
+        display_text = f"{prefix} {safe_text}{photo_mark}"
         if cat_name is None:
             no_cat.append((agr_id, display_text, is_done))
         else:
@@ -323,7 +325,8 @@ def build_list_message(user_id: int, only_active: bool = False, only_done: bool 
                 ])
 
     for cat, items in groups.items():
-        response += f"\n📂 *{cat}:*\n"
+        safe_cat = escape_markdown(cat, version=2)
+        response += f"\n📂 *{safe_cat}:*\n"
         for agr_id, text, is_done in items:
             status = "⬜" if not is_done else "✅"
             response += f"  {status} {text}\n"
@@ -419,7 +422,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     level = xp // 100 + 1
     coins = get_coins(user_id)
 
-    # Приветственное сообщение (без Markdown, чтобы избежать ошибок)
+    # Без parse_mode, чтобы избежать ошибок разметки
     welcome_text = (
         f"👋 Привет, {username or 'друг'}! Я твой персональный трекер обещаний.\n\n"
         "✨ Что я умею:\n"
@@ -536,12 +539,14 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if ADMIN_ID:
         try:
+            # Экранируем фидбек, чтобы не сломать Markdown
+            safe_fb = escape_markdown(feedback_text, version=2)
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"📝 **Новый фидбек!**\n\n"
                      f"От: @{username}\n"
                      f"ID: `{user_id}`\n"
-                     f"Текст: {feedback_text}",
+                     f"Текст: {safe_fb}",
                 parse_mode="Markdown"
             )
         except:
@@ -579,7 +584,8 @@ async def difficulty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         del context.user_data['pending_agreement_text']
         add_agreement(user_id, text, difficulty=diff)
         diff_names = {0: "Легко", 1: "Средне", 2: "Хардкор"}
-        await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{text}\"")
+        safe_text = escape_markdown(text, version=2)
+        await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{safe_text}\"", parse_mode="Markdown")
         new_achievements = check_achievements(user_id)
         for key in new_achievements:
             if key.startswith("streak_"):
@@ -618,7 +624,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cat_stats:
         message += "📂 **По категориям:**\n"
         for cat in cat_stats:
-            message += f"  {cat['name']}: {cat['done']}/{cat['total']} ({cat['percent']}%)\n"
+            safe_cat_name = escape_markdown(cat['name'], version=2)
+            message += f"  {safe_cat_name}: {cat['done']}/{cat['total']} ({cat['percent']}%)\n"
 
     if stats['streak'] >= 30:
         message += "\n🔥 Легендарная серия! Ты невероятен!"
@@ -707,7 +714,8 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat_str = f"[{agr.get('category_name', '')}] " if agr.get("category_name") else ""
         created_dt = agr["created_at"]
         created_formatted = created_dt.strftime("%Y-%m-%d %H:%M") if isinstance(created_dt, datetime) else str(created_dt)
-        text += f"{status} {cat_str}{agr['text']} ({created_formatted})\n"
+        safe_text = escape_markdown(agr['text'], version=2)
+        text += f"{status} {cat_str}{safe_text} ({created_formatted})\n"
 
     text += f"\nВсего записей: {len(data)}\nВыполнено: {stats['done']} из {stats['total']} ({stats['percent']}%)"
 
@@ -793,7 +801,8 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "Пока нет ни одной."
     else:
         for i, cat in enumerate(cats, 1):
-            text += f"  {i}. {cat['name']}\n"
+            safe_name = escape_markdown(cat['name'], version=2)
+            text += f"  {i}. {safe_name}\n"
     text += "\nВыбери действие:"
     keyboard = [
         [InlineKeyboardButton("➕ Создать категорию", callback_data="cat_create")],
@@ -862,6 +871,7 @@ async def smart_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_agr = agreements[0]
     agr_id = last_agr["_id"]
 
+    safe_task = escape_markdown(task_text, version=2)
     if is_recurring and recurring_day is not None:
         days_ahead = recurring_day - remind_date.weekday()
         if days_ahead <= 0:
@@ -874,7 +884,7 @@ async def smart_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day_name = [k for k, v in DAYS_RU.items() if v == recurring_day][0]
         await update.message.reply_text(
             f"✅ **Напоминание создано!**\n\n"
-            f"📝 Задача: {task_text}\n"
+            f"📝 Задача: {safe_task}\n"
             f"🔄 Повтор: каждый {day_name.capitalize()} в {remind_time}\n"
             f"⏰ Первое напоминание: {next_date.strftime('%d.%m.%Y')}",
             parse_mode="Markdown"
@@ -883,7 +893,7 @@ async def smart_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         create_scheduled_reminder(user_id, agr_id, remind_date, remind_time)
         await update.message.reply_text(
             f"✅ **Напоминание создано!**\n\n"
-            f"📝 Задача: {task_text}\n"
+            f"📝 Задача: {safe_task}\n"
             f"📅 Дата: {remind_date.strftime('%d.%m.%Y')}\n"
             f"⏰ Время: {remind_time}",
             parse_mode="Markdown"
@@ -936,7 +946,7 @@ async def pet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ascii_art = get_pet_ascii_art(pet_type, level, mood, is_sick)
 
     message = (
-        f"{current_emoji} **{pet['name']}** (уровень {level})\n"
+        f"{current_emoji} **{escape_markdown(pet['name'], version=2)}** (уровень {level})\n"
         f"🍖 Сытость: {pet['hunger']}/200\n"
         f"😊 Настроение: {pet['mood']}/200 ({status_emoji})\n"
         f"✨ Опыт: {pet['xp']}/100\n"
@@ -1030,7 +1040,8 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if recent_feedback:
         feedback_text = "\n📝 **Последний фидбек:**\n"
         for fb in recent_feedback:
-            feedback_text += f"• @{fb['username']}: {fb['text'][:50]}...\n"
+            safe_text = escape_markdown(fb['text'][:50] + '...' if len(fb['text'])>50 else fb['text'], version=2)
+            feedback_text += f"• @{fb['username']}: {safe_text}\n"
 
     message = (
         "📊 **Статистика бота**\n\n"
@@ -1087,11 +1098,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         moto_msg = get_motivation_message("task_completed")
         coins_msg = get_coins_message(reward["coins"])
+        safe_text = escape_markdown(reward['text'][:50], version=2)
         await query.edit_message_text(
-            f"✅ Выполнено: «{reward['text'][:50]}»\n\n"
+            f"✅ Выполнено: «{safe_text}»\n\n"
             f"{moto_msg}\n"
             f"{coins_msg}\n"
-            f"✨ +{reward['xp']} опыта"
+            f"✨ +{reward['xp']} опыта",
+            parse_mode="Markdown"
         )
 
         update_pet_stats(user_id, hunger_delta=20, mood_delta=30, performed=True)
@@ -1126,9 +1139,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not agreement:
             await query.edit_message_text("Обещание не найдено.")
             return
+        safe_text = escape_markdown(agreement['text'], version=2)
         context.user_data['editing_agreement_id'] = agr_id
         await query.edit_message_text(
-            f"✏️ Введите новый текст для обещания:\n«{agreement['text']}»\n\n"
+            f"✏️ Введите новый текст для обещания:\n«{safe_text}»\n\n"
             "Отправьте сообщение с новым текстом или /cancel для отмены."
         )
         return
@@ -1139,11 +1153,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not agreement:
             await query.edit_message_text("Обещание не найдено.")
             return
+        safe_text = escape_markdown(agreement['text'], version=2)
         keyboard = [[
             InlineKeyboardButton("✅ Да", callback_data=f"confirm_delete_{agr_id}"),
             InlineKeyboardButton("❌ Нет", callback_data="show_list")
         ]]
-        await query.edit_message_text(f"Удалить «{agreement['text']}»?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Удалить «{safe_text}»?", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     elif data.startswith("confirm_delete_"):
@@ -1302,7 +1317,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Текст не может быть пустым. Редактирование отменено.")
             return
         update_agreement(agr_id, new_text)
-        await update.message.reply_text(f"✅ Обещание обновлено: «{new_text}»")
+        safe_text = escape_markdown(new_text, version=2)
+        await update.message.reply_text(f"✅ Обещание обновлено: «{safe_text}»")
         t, m = build_list_message(user_id, only_active=True)
         for part in split_message(t):
             await update.message.reply_text(part, parse_mode="Markdown", reply_markup=m if part == t else None)
@@ -1416,7 +1432,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
     if context.bot is None:
         return
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     now_msk = now_utc + MSK_OFFSET
     now_time = now_msk.strftime("%H:%M")
     today_msk = now_msk.date()
@@ -1428,7 +1444,7 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
         if remind_time == now_time:
             agreements = get_agreements(user_id, only_active=True)
             if agreements:
-                undone = [a["text"] for a in agreements if not a["is_done"]]
+                undone = [escape_markdown(a["text"], version=2) for a in agreements if not a["is_done"]]
                 if undone:
                     message = "🔔 **Напоминание!**\n\n"
                     for t in undone[:5]:
@@ -1441,8 +1457,9 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
 
     pending = get_pending_reminders_for_now(today_msk, now_time)
     for reminder_id, user_id, text in pending:
+        safe_text = escape_markdown(text, version=2)
         try:
-            await context.bot.send_message(chat_id=user_id, text=f"🔔 **Напоминание:** {text}", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=user_id, text=f"🔔 **Напоминание:** {safe_text}", parse_mode="Markdown")
             delete_scheduled_reminder(reminder_id)
         except:
             pass
@@ -1531,13 +1548,13 @@ def main():
     if application.job_queue:
         application.job_queue.run_repeating(check_scheduled_jobs, interval=60, first=10)
 
-    # Запускаем Flask в отдельном потоке (фоновый), чтобы Render видел открытый порт
+    # Flask в фоновом потоке
     port = int(os.environ.get("PORT", 10000))
     flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True)
     flask_thread.start()
     logging.info("Flask health-check запущен в фоне")
 
-    # Бот работает в главном потоке (обработка сигналов корректна)
+    # Бот в главном потоке
     logging.info("Бот запущен в главном потоке")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
