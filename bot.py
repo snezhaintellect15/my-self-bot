@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import os
 import re
@@ -45,10 +46,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "MyPromiseTrackerBot")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 MSK_OFFSET = timedelta(hours=3)
-
-# Реквизиты для донатов берутся из переменных окружения (безопасно)
-DONATION_YOOMONEY = os.environ.get("DONATION_YOOMONEY", "")
-DONATION_CARD = os.environ.get("DONATION_CARD", "")
 
 app = Flask(__name__)
 
@@ -162,12 +159,39 @@ MONTHS_RU = {
 def parse_natural_language(text: str):
     text_lower = text.lower()
     today = date.today()
+    now = datetime.now()
     remind_date = today
     remind_time = "09:00"
     task_text = text
     is_recurring = False
     recurring_day = None
 
+    # --- Относительное время ("через X минут/часов/дней") ---
+    relative_match = re.search(r'через\s+(\d+)\s+(минут[уы]?|час[а]?[ов]?|день|дня|дней)', text_lower)
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        if 'минут' in unit:
+            delta = timedelta(minutes=amount)
+        elif 'час' in unit:
+            delta = timedelta(hours=amount)
+        elif 'день' in unit or 'дня' in unit or 'дней' in unit:
+            delta = timedelta(days=amount)
+        else:
+            delta = timedelta(minutes=amount)
+        target_dt = now + delta
+        remind_date = target_dt.date()
+        remind_time = target_dt.strftime("%H:%M")
+        task_text = re.sub(r'через\s+\d+\s+(минут[уы]?|час[а]?[ов]?|день|дня|дней)\s*,?\s*', '', text, flags=re.IGNORECASE)
+        markers = ['напомни', 'мне', 'что', 'нужно', 'сделать', 'купить', 'позвонить', 'напомнить']
+        for marker in markers:
+            task_text = re.sub(r'^' + marker + r'\s*', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        if not task_text:
+            task_text = "Напоминание"
+        return remind_date, remind_time, task_text, False, None
+
+    # --- Абсолютное время ---
     time_patterns = [
         r'(\d{1,2}):(\d{2})',
         r'в (\d{1,2})\s*часов?\s*(\d{1,2})?\s*минут?',
@@ -541,14 +565,9 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if ADMIN_ID:
         try:
-            safe_fb = escape_markdown(feedback_text, version=2)
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"📝 **Новый фидбек!**\n\n"
-                     f"От: @{username}\n"
-                     f"ID: `{user_id}`\n"
-                     f"Текст: {safe_fb}",
-                parse_mode="Markdown"
+                text=f"📝 Новый фидбек!\n\nОт: @{username}\nID: {user_id}\nТекст: {feedback_text}"
             )
         except Exception as e:
             logging.error(f"Не удалось уведомить админа о фидбеке: {e}")
@@ -727,13 +746,16 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat_stats = get_stats_by_category(user_id)
         try:
             pdf_bytes = generate_pdf(user_id, stats, cat_stats, data)
+            if not pdf_bytes or len(pdf_bytes) == 0:
+                raise ValueError("Сгенерированный PDF пуст")
+            pdf_file = io.BytesIO(pdf_bytes)
+            pdf_file.name = "promise_tracker_report.pdf"
             await update.message.reply_document(
-                document=pdf_bytes,
-                filename="promise_tracker_report.pdf",
+                document=pdf_file,
                 caption="📎 Ваш PDF-отчёт"
             )
         except Exception as e:
-            logging.error(f"Ошибка генерации PDF: {e}")
+            logging.error(f"Ошибка генерации PDF: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Не удалось создать PDF: {e}")
 
 async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -741,16 +763,18 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     premium = is_premium(user_id)
     status_text = "активен ✅" if premium else "неактивен ❌"
 
-    # Формируем строку с донатами, если они заданы
-    donation_lines = []
-    if DONATION_YOOMONEY:
-        donation_lines.append(f"💳 ЮMoney: {DONATION_YOOMONEY}")
-    if DONATION_CARD:
-        donation_lines.append(f"🏦 Т‑Банк: {DONATION_CARD}")
-    if not donation_lines:
-        donation_lines.append("Пока реквизиты не добавлены. Напишите разработчику.")
+    yoo_money = os.environ.get("DONATION_YOOMONEY", "")
+    card_number = os.environ.get("DONATION_CARD", "")
 
-    donation_text = "\n".join(donation_lines)
+    donation_message = ""
+    if yoo_money or card_number:
+        donation_message = "\n☕ **Поддержать донатом:**\n"
+        if yoo_money:
+            donation_message += f"💳 ЮMoney: {yoo_money}\n"
+        if card_number:
+            donation_message += f"🏦 Т-Банк: {card_number}\n"
+    else:
+        donation_message = "\n☕ **Поддержать проект:**\nИспользуйте команду /feedback, чтобы связаться с разработчиком.\n"
 
     message = (
         f"⭐ **Премиум-доступ**\n\n"
@@ -767,17 +791,17 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 90 дней — 125 Stars (скидка 15%)\n"
         f"• Навсегда — 500 Stars\n\n"
         f"👥 **Получить БЕСПЛАТНО:**\n"
-        f"Пригласи друга по ссылке /invite\n\n"
-        f"☕ **Поддержать донатом:**\n"
-        f"{donation_text}"
+        f"Пригласи друга по ссылке /invite\n"
+        f"{donation_message}"
     )
 
     keyboard = [
         [InlineKeyboardButton("⭐ 30 дней (50 Stars)", callback_data="premium_30")],
         [InlineKeyboardButton("🔥 90 дней (125 Stars)", callback_data="premium_90")],
         [InlineKeyboardButton("👑 Навсегда (500 Stars)", callback_data="premium_forever")],
-        [InlineKeyboardButton("☕ Поддержать донатом", callback_data="donate_info")],
     ]
+    if not (yoo_money or card_number):
+        keyboard.append([InlineKeyboardButton("☕ Поддержать донатом", callback_data="donate_info")])
 
     await update.message.reply_text(message, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1284,16 +1308,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif data == "donate_info":
-        donation_msg = "☕ **Поддержать проект**\n\n"
-        if DONATION_YOOMONEY:
-            donation_msg += f"💳 ЮMoney: {DONATION_YOOMONEY}\n"
-        if DONATION_CARD:
-            donation_msg += f"🏦 Т‑Банк: {DONATION_CARD}\n"
-        if not DONATION_YOOMONEY and not DONATION_CARD:
-            donation_msg += "Пока реквизиты не добавлены. Свяжитесь с разработчиком.\n"
-        donation_msg += "\n⭐ **Telegram Stars:** через кнопки выше\n"
-        donation_msg += "Спасибо, что помогаете боту расти! 🙏"
-        await query.edit_message_text(donation_msg, parse_mode="Markdown")
+        await query.edit_message_text(
+            "☕ **Поддержать проект**\n\n"
+            "Если бот помогает вам быть продуктивнее, вы можете поддержать его развитие:\n\n"
+            "Для поддержки проекта свяжитесь с разработчиком через команду /feedback\n\n"
+            "Спасибо, что помогаете боту расти! 🙏",
+            parse_mode="Markdown"
+        )
         return
 
     elif data.startswith("premium_"):
@@ -1314,7 +1335,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title="Promise Tracker Premium",
             description=f"Премиум-доступ на {days if days < 3650 else 'все время'} дней",
             payload=data,
-            provider_token="",   # Обязательно для Telegram Stars
+            provider_token="",
             currency="XTR",
             prices=[LabeledPrice("Premium", stars_cost)],
             start_parameter="premium_subscription"
