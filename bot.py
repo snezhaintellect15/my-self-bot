@@ -916,10 +916,17 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     donation_message = ""
     if yoo_money or card_number:
         donation_message = "\n☕ **Поддержать донатом:**\n"
+         "💰 Цены в рублях:\n"
+            "• 30 дней — 200 ₽\n"
+            "• 90 дней — 450 ₽\n"
+            "• Навсегда — 2000 ₽\n\n"
+            "Реквизиты для перевода:\n"
+        )
         if yoo_money:
             donation_message += f"💳 ЮMoney: {yoo_money}\n"
         if card_number:
             donation_message += f"🏦 Т-Банк: {card_number}\n"
+        donation_message += "\nПосле оплаты напишите /feedback с подтверждением."
     else:
         donation_message = "\n☕ **Поддержать проект:**\nИспользуйте команду /feedback, чтобы связаться с разработчиком.\n"
 
