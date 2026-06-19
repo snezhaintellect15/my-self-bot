@@ -451,7 +451,18 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if is_premium(update.effective_user.id):
         keyboard.append([KeyboardButton("👑 VIP-помощь")])
-    await update.message.reply_text("Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+
+    # Если это колбэк — используем сообщение из колбэка
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            "Выбери действие:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+    elif update.message:
+        await update.message.reply_text(
+            "Выбери действие:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
