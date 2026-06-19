@@ -23,7 +23,7 @@ from database import (init_db, create_user, is_premium, set_premium,
                       count_scheduled_reminders, create_scheduled_reminder,
                       get_pending_reminders_for_now, delete_scheduled_reminder,
                       get_ref_code, get_user_by_ref_code, get_referral_stats,
-                      get_admin_stats, add_xp, get_xp, use_freeze,
+                      get_admin_stats, add_xp, get_xp, use_freeze, get_freezes_count,
                       get_pet, update_pet_stats, get_pet_message, change_pet,
                       get_shop_items, buy_item, get_inventory,
                       get_coins, add_coins,
@@ -159,7 +159,6 @@ MONTHS_RU = {
 def parse_natural_language(text: str):
     text_lower = text.lower()
     today = date.today()
-    # ИСПРАВЛЕНО: берём московское время
     now = datetime.now(timezone.utc) + MSK_OFFSET
     remind_date = today
     remind_time = "09:00"
@@ -192,7 +191,7 @@ def parse_natural_language(text: str):
             task_text = "Напоминание"
         return remind_date, remind_time, task_text, False, None
 
-    # --- Абсолютное время (исправлено, без IndexError) ---
+    # --- Абсолютное время ---
     time_match = None
 
     # 1) "HH:MM"
@@ -253,7 +252,7 @@ def parse_natural_language(text: str):
                 recurring_day = day_num
                 task_text = re.sub(r'(каждый|каждую)\s+' + day_name + r'\s*', '', text, flags=re.IGNORECASE)
 
-    # --- Относительные даты (завтра, послезавтра, сегодня) ---
+    # --- Относительные даты ---
     if 'послезавтра' in text_lower:
         remind_date = today + timedelta(days=2)
         task_text = re.sub(r'послезавтра\s*', '', text, flags=re.IGNORECASE)
@@ -264,7 +263,7 @@ def parse_natural_language(text: str):
         remind_date = today
         task_text = re.sub(r'сегодня\s*', '', text, flags=re.IGNORECASE)
 
-    # --- Абсолютные даты ("15 мая") ---
+    # --- Абсолютные даты ---
     date_match = re.search(r'(\d{1,2})\s+(\w+)', text_lower)
     if date_match and not is_recurring:
         day = int(date_match.group(1))
@@ -291,7 +290,7 @@ def parse_natural_language(text: str):
                 task_text = re.sub(day_name + r'\s*', '', text, flags=re.IGNORECASE)
                 break
 
-    # --- Очистка оставшихся служебных слов ---
+    # --- Очистка ---
     markers = ['напомни', 'сделать', 'купить', 'позвонить', 'напомнить', 'в ']
     for marker in markers:
         task_text = re.sub(r'^' + marker + r'\s*', '', task_text, flags=re.IGNORECASE)
@@ -738,7 +737,7 @@ async def achievements_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(message, parse_mode="Markdown")
 
 def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
-    pdf = FPDF()
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
@@ -792,31 +791,34 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
         pdf.set_font_size(10)
         # Шапка таблицы
         pdf.set_fill_color(245, 245, 245)
-        pdf.cell(60, 7, "Текст", border=1, fill=True)
-        pdf.cell(35, 7, "Создано", border=1, fill=True)
-        pdf.cell(35, 7, "Выполнено", border=1, fill=True)
-        pdf.cell(30, 7, "Категория", border=1, fill=True)
+        col_widths = [22, 95, 40, 40, 40]
+        pdf.cell(col_widths[0], 7, "Статус", border=1, fill=True)
+        pdf.cell(col_widths[1], 7, "Текст", border=1, fill=True)
+        pdf.cell(col_widths[2], 7, "Создано", border=1, fill=True)
+        pdf.cell(col_widths[3], 7, "Выполнено", border=1, fill=True)
+        pdf.cell(col_widths[4], 7, "Категория", border=1, fill=True)
         pdf.ln()
         for agr in agreements_list[:100]:
+            status = "[V]" if agr.get("is_done") else "[ ]"
             text = agr["text"][:50] + ("..." if len(agr["text"]) > 50 else "")
             created = agr["created_at"].strftime("%d.%m.%y") if isinstance(agr.get("created_at"), datetime) else str(agr.get("created_at", ""))
             done_date = ""
             if agr.get("is_done") and agr.get("done_at"):
                 done_date = agr["done_at"].strftime("%d.%m.%y") if isinstance(agr["done_at"], datetime) else str(agr["done_at"])
-            cat = agr.get("category_name") or "—"
-            pdf.cell(60, 7, text, border=1)
-            pdf.cell(35, 7, created, border=1)
-            pdf.cell(35, 7, done_date, border=1)
-            pdf.cell(30, 7, cat, border=1)
+            cat = agr.get("category_name") or "-"
+            pdf.cell(col_widths[0], 7, status, border=1)
+            pdf.cell(col_widths[1], 7, text, border=1)
+            pdf.cell(col_widths[2], 7, created, border=1)
+            pdf.cell(col_widths[3], 7, done_date, border=1)
+            pdf.cell(col_widths[4], 7, cat, border=1)
             pdf.ln()
         pdf.ln(4)
 
-    # Выводим выполненные (зелёный)
-    print_agreement_list("✅ Выполненные обещания", done_agreements, (0, 128, 0))
-    # Активные (оранжевый)
-    print_agreement_list("⬜ Активные обещания", active_agreements, (200, 80, 0))
+    # Выводим выполненные (зелёный) и активные (оранжевый)
+    print_agreement_list("[V] Выполненные обещания", done_agreements, (0, 128, 0))
+    print_agreement_list("[ ] Активные обещания", active_agreements, (200, 80, 0))
 
-    # --- График продуктивности по дням (только для премиум) ---
+    # --- График продуктивности за 7 дней ---
     try:
         today = date.today()
         days = []
@@ -842,22 +844,22 @@ def generate_pdf(user_id: int, stats: dict, cat_stats: list, agreements: list):
         pdf.ln(4)
 
         max_count = max(counts) if counts else 1
-        bar_width = 20
-        chart_x = 30
-        chart_y = pdf.get_y()
-        max_bar_height = 60
+        bar_width = 22
+        chart_x = 35
+        chart_y = pdf.get_y() + 10
+        max_bar_height = 70
         pdf.set_fill_color(100, 180, 255)
         pdf.set_draw_color(0, 0, 0)
         for i, cnt in enumerate(counts):
             h = (cnt / max_count) * max_bar_height if max_count > 0 else 0
-            x = chart_x + i * (bar_width + 8)
+            x = chart_x + i * (bar_width + 10)
             pdf.rect(x, chart_y + max_bar_height - h, bar_width, h, style="DF")
             pdf.set_xy(x, chart_y + max_bar_height + 2)
             pdf.set_font_size(8)
             pdf.cell(bar_width, 5, days[i], align="C")
             pdf.set_xy(x, chart_y + max_bar_height - h - 7)
             pdf.cell(bar_width, 5, str(cnt), align="C")
-        pdf.ln(max_bar_height + 12)
+        pdf.ln(max_bar_height + 15)
     except Exception as e:
         logging.error(f"Не удалось построить график: {e}")
 
@@ -906,6 +908,7 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
     status_text = "активен ✅" if premium else "неактивен ❌"
+    freezes_count = get_freezes_count(user_id) if premium else 0
 
     yoo_money = os.environ.get("DONATION_YOOMONEY", "")
     card_number = os.environ.get("DONATION_CARD", "")
@@ -935,7 +938,7 @@ async def premium_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Безлимитные напоминания\n"
         f"• Экспорт в PDF с графиком продуктивности\n"
         f"• Безлимитные фото-подтверждения\n"
-        f"• 3 заморозки дня (сохраняют серию)\n"
+        f"• 3 заморозки дня (сохраняют серию, осталось: {freezes_count})\n"
         f"• Эксклюзивный питомец «Феникс»\n"
         f"• Приоритетная поддержка (/viphelp)\n\n"
         f"💎 **Цены:**\n"
@@ -1181,11 +1184,25 @@ async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_premium(user_id):
         await update.message.reply_text("🛡 Заморозка доступна только премиум-пользователям.")
         return
-    success = use_freeze(user_id)
-    if success:
-        await update.message.reply_text("❄️ День заморожен! Ваша серия не прервётся.")
-    else:
+
+    user = db.users.find_one({"user_id": user_id})
+    freezes = user.get("freezes_available", 0) if user else 0
+
+    if freezes <= 0:
         await update.message.reply_text("😔 У вас не осталось заморозок.")
+        return
+
+    # Показываем подтверждение
+    keyboard = [[
+        InlineKeyboardButton("✅ Да, заморозить", callback_data="confirm_freeze"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel_freeze")
+    ]]
+    await update.message.reply_text(
+        f"🛡 У вас есть {freezes} замороз(ок).\n\n"
+        "Вы уверены? Заморозка сохранит вашу серию на сегодня, даже если вы не выполните ни одного обещания.\n"
+        "⚠️ Это действие нельзя отменить.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     challenges = get_active_challenges()
@@ -1463,6 +1480,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg)
         return
 
+    elif data == "confirm_freeze":
+        user_id = query.from_user.id
+        success = use_freeze(user_id)
+        if success:
+            user = db.users.find_one({"user_id": user_id})
+            freezes = user.get("freezes_available", 0) if user else 0
+            await query.edit_message_text(f"❄️ День заморожен! Ваша серия не прервётся.\nОсталось заморозок: {freezes}")
+        else:
+            await query.edit_message_text("😔 Не удалось применить заморозку. Возможно, они закончились или уже использованы сегодня.")
+        return
+
+    elif data == "cancel_freeze":
+        await query.edit_message_text("❌ Заморозка отменена.")
+        return
+
     elif data == "donate_info":
         await query.edit_message_text(
             "☕ **Поддержать проект**\n\n"
@@ -1690,6 +1722,30 @@ async def check_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
+    # Вечерняя проверка серии (за час до полуночи по МСК)
+    if now_time == "23:00":
+        active_users = db.agreements.distinct("user_id", {"is_done": False})
+        for uid in active_users[:50]:
+            try:
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                last_done = db.agreements.find_one(
+                    {"user_id": uid, "is_done": True, "done_at": {"$gte": today_start}}
+                )
+                if not last_done:
+                    freezes = db.users.find_one({"user_id": uid})
+                    freezes_count = freezes.get("freezes_available", 0) if freezes else 0
+                    msg = (
+                        "⚠️ Сегодня у вас ещё нет выполненных обещаний!\n"
+                        "Ваша серия может сброситься в полночь.\n\n"
+                    )
+                    if freezes_count > 0:
+                        msg += f"У вас есть {freezes_count} замороз(ок). Используйте /freeze, чтобы сохранить серию."
+                    else:
+                        msg += "У вас нет заморозок. Выполните хотя бы одно обещание до полуночи!"
+                    await context.bot.send_message(chat_id=uid, text=msg)
+            except:
+                pass
+
     if now_time == "03:00":
         for user_id, _ in get_users_with_reminders()[:50]:
             if lose_level_if_inactive(user_id):
@@ -1761,4 +1817,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-         

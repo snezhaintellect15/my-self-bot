@@ -1,7 +1,7 @@
 import os
 import uuid
 import random
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
 
@@ -73,10 +73,8 @@ def update_pet_stats(user_id: int, hunger_delta: int = 0, mood_delta: int = 0, p
     pet["hunger"] = max(0, min(200, pet["hunger"] + hunger_delta))
     pet["mood"] = max(0, min(200, pet["mood"] + mood_delta))
 
-    # Болезнь при низком настроении
     if pet["mood"] < 30:
         pet["is_sick"] = True
-    # Выздоровление при поднятии настроения
     elif pet["mood"] >= 50 and pet.get("is_sick", False):
         pet["is_sick"] = False
         pet["consecutive_done"] = 0
@@ -182,8 +180,7 @@ def change_pet(user_id: int, new_type: str, cost_xp: int = 0, cost_coins: int = 
     user = db.users.find_one({"user_id": user_id})
     if not user:
         return False
-    # Дополнительная проверка: премиум-питомцы требуют премиума
-    if PET_TYPES[new_type]["premium"] and not (user.get("is_premium") and user.get("premium_until") and user["premium_until"] > datetime.utcnow()):
+    if PET_TYPES[new_type]["premium"] and not (user.get("is_premium") and user.get("premium_until") and user["premium_until"] > datetime.now(timezone.utc)):
         return False
     if cost_xp > 0:
         current_xp = user.get("xp", 0)
@@ -236,18 +233,13 @@ def get_inventory(user_id: int):
 
 # ---------- Пользователи ----------
 def init_db():
-    # Индексы для пользователей
     db.users.create_index("user_id", unique=True)
     db.users.create_index("ref_code")
-    # Индексы для обещаний
     db.agreements.create_index("user_id")
     db.agreements.create_index([("user_id", ASCENDING), ("is_done", ASCENDING), ("done_at", DESCENDING)])
     db.agreements.create_index("is_done")
-    # Индексы для категорий
     db.categories.create_index("user_id")
-    # Индексы для напоминаний
     db.scheduled_reminders.create_index([("remind_date", ASCENDING), ("remind_time", ASCENDING), ("is_recurring", ASCENDING)])
-    # Коллекции
     if "feedback" not in db.list_collection_names():
         db.create_collection("feedback")
     if "polls" not in db.list_collection_names():
@@ -262,7 +254,7 @@ def create_user(user_id: int, referrer_id: int = None):
         "user_id": user_id, "is_premium": False, "premium_until": None,
         "ref_code": ref_code, "referrer_id": referrer_id, "xp": 0,
         "coins": 0, "freezes_available": 0, "pet": None, "inventory": [],
-        "username": None, "created_at": datetime.utcnow()
+        "username": None, "created_at": datetime.now(timezone.utc)
     }
     db.users.insert_one(new_user)
     get_pet(user_id)
@@ -271,10 +263,10 @@ def create_user(user_id: int, referrer_id: int = None):
         referrer = db.users.find_one({"user_id": referrer_id})
         if referrer:
             current_until = referrer.get("premium_until")
-            if current_until and current_until > datetime.utcnow():
+            if current_until and current_until > datetime.now(timezone.utc):
                 new_until = current_until + timedelta(days=7)
             else:
-                new_until = datetime.utcnow() + timedelta(days=7)
+                new_until = datetime.now(timezone.utc) + timedelta(days=7)
             db.users.update_one({"user_id": referrer_id}, {"$set": {"is_premium": True, "premium_until": new_until}})
 
 def is_premium(user_id: int) -> bool:
@@ -282,7 +274,7 @@ def is_premium(user_id: int) -> bool:
     if not user:
         return False
     if user.get("is_premium") and user.get("premium_until"):
-        if user["premium_until"] > datetime.utcnow():
+        if user["premium_until"] > datetime.now(timezone.utc):
             return True
         else:
             db.users.update_one({"user_id": user_id}, {"$set": {"is_premium": False}})
@@ -291,8 +283,7 @@ def is_premium(user_id: int) -> bool:
 
 def set_premium(user_id: int, status: bool, days: int = 0):
     if days > 0:
-        premium_until = datetime.utcnow() + timedelta(days=days)
-        # При активации премиума выдаём 3 заморозки
+        premium_until = datetime.now(timezone.utc) + timedelta(days=days)
         db.users.update_one(
             {"user_id": user_id},
             {"$set": {"is_premium": True, "premium_until": premium_until, "freezes_available": 3}},
@@ -315,14 +306,35 @@ def get_coins(user_id: int) -> int:
     user = db.users.find_one({"user_id": user_id})
     return user.get("coins", 0) if user else 0
 
+def get_freezes_count(user_id: int) -> int:
+    user = db.users.find_one({"user_id": user_id})
+    return user.get("freezes_available", 0) if user else 0
+
 def use_freeze(user_id: int) -> bool:
     user = db.users.find_one({"user_id": user_id})
     if not user or user.get("freezes_available", 0) <= 0:
         return False
+
+    # Проверяем, не применена ли уже заморозка сегодня
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    already_frozen = db.agreements.find_one({
+        "user_id": user_id,
+        "is_freeze": True,
+        "created_at": {"$gte": today_start}
+    })
+    if already_frozen:
+        return False
+
     db.users.update_one({"user_id": user_id}, {"$inc": {"freezes_available": -1}})
-    today = date.today()
-    doc = {"user_id": user_id, "text": "❄️ Заморозка дня", "created_at": datetime.utcnow(),
-           "is_done": True, "done_at": datetime.utcnow(), "is_freeze": True, "difficulty": 0}
+    doc = {
+        "user_id": user_id,
+        "text": "❄️ Заморозка дня",
+        "created_at": datetime.now(timezone.utc),
+        "is_done": True,
+        "done_at": datetime.now(timezone.utc),
+        "is_freeze": True,
+        "difficulty": 0
+    }
     db.agreements.insert_one(doc)
     return True
 
@@ -353,7 +365,7 @@ def delete_category(user_id: int, category_id):
 def add_agreement(user_id: int, text: str, category_id=None, difficulty: int = 0):
     doc = {
         "user_id": user_id, "text": text, "category_id": category_id,
-        "created_at": datetime.utcnow(), "is_done": False, "done_at": None,
+        "created_at": datetime.now(timezone.utc), "is_done": False, "done_at": None,
         "difficulty": difficulty, "is_freeze": False, "photo_file_id": None
     }
     db.agreements.insert_one(doc)
@@ -403,9 +415,9 @@ def mark_done(agreement_id: str, photo_file_id: str = None):
     if not agreement:
         return None
     if agreement.get("is_done", False):
-        return None  # уже выполнено
+        return None
 
-    update = {"is_done": True, "done_at": datetime.utcnow()}
+    update = {"is_done": True, "done_at": datetime.now(timezone.utc)}
     if photo_file_id:
         update["photo_file_id"] = photo_file_id
     db.agreements.update_one({"_id": oid}, {"$set": update})
@@ -427,7 +439,7 @@ def delete_agreement(agreement_id: str):
 
 # ---------- Лимит фото ----------
 def count_photos_today(user_id: int) -> int:
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     return db.agreements.count_documents({
         "user_id": user_id, "is_done": True,
         "photo_file_id": {"$ne": None},
@@ -464,7 +476,7 @@ def create_daily_challenge():
         "participants": [],
         "completed": [],
         "is_daily": True,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     result = db.challenges.insert_one(challenge)
     return result.inserted_id
@@ -494,7 +506,7 @@ def check_challenge_completion(challenge_id: str):
     challenge = db.challenges.find_one({"_id": oid})
     if not challenge:
         return []
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     completed = []
     for user_id in challenge.get("participants", []):
         done = db.agreements.count_documents({
@@ -575,7 +587,6 @@ def get_stats(user_id: int):
     done = db.agreements.count_documents({"user_id": user_id, "is_done": True})
     percent = round(done / total * 100, 1) if total > 0 else 0.0
 
-    # Используем done_at для подсчёта серии
     pipeline = [
         {"$match": {"user_id": user_id, "is_done": True}},
         {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$done_at"}}}},
@@ -655,7 +666,6 @@ def check_achievements(user_id: int):
 
 # ---------- Запланированные напоминания ----------
 def count_scheduled_reminders(user_id: int) -> int:
-    # Считаем только будущие напоминания
     today = date.today().isoformat()
     return db.scheduled_reminders.count_documents({
         "user_id": user_id,
@@ -675,7 +685,7 @@ def create_scheduled_reminder(user_id: int, agreement_id, remind_date, remind_ti
         "remind_time": remind_time,
         "is_recurring": is_recurring,
         "recurring_day": recurring_day,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     db.scheduled_reminders.insert_one(doc)
 
@@ -714,7 +724,7 @@ def get_admin_stats():
     total_users = db.users.count_documents({})
     total_agreements = db.agreements.count_documents({})
     premium_users = db.users.count_documents({"is_premium": True})
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     active_today = len(set(
         db.agreements.distinct("user_id", {"created_at": {"$gte": today_start}})
     ))
@@ -731,14 +741,14 @@ def save_feedback(user_id: int, username: str, text: str):
         "user_id": user_id,
         "username": username,
         "text": text,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     })
 
 def get_recent_feedback(limit: int = 20):
     return list(db.feedback.find().sort("created_at", -1).limit(limit))
 
 def has_poll_today(user_id: int) -> bool:
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     last_poll = db.polls.find_one({"user_id": user_id, "date": today.isoformat()})
     return last_poll is not None
 
@@ -746,5 +756,5 @@ def save_poll_response(user_id: int, answer: str):
     db.polls.insert_one({
         "user_id": user_id,
         "answer": answer,
-        "date": datetime.utcnow().date().isoformat()
+        "date": datetime.now(timezone.utc).date().isoformat()
     })
