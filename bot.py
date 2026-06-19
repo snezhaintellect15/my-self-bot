@@ -1000,7 +1000,12 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cats:
         keyboard.append([InlineKeyboardButton("🗑 Удалить категорию", callback_data="cat_delete_menu")])
     keyboard.append([InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_menu")])
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    # Если это колбэк (update.callback_query существует), редактируем сообщение
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
