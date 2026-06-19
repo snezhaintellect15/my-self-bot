@@ -180,8 +180,15 @@ def change_pet(user_id: int, new_type: str, cost_xp: int = 0, cost_coins: int = 
     user = db.users.find_one({"user_id": user_id})
     if not user:
         return False
-    if PET_TYPES[new_type]["premium"] and not (user.get("is_premium") and user.get("premium_until") and user["premium_until"] > datetime.now(timezone.utc)):
-        return False
+    # Проверка премиума с учётом временной зоны
+    if PET_TYPES[new_type]["premium"]:
+        if not user.get("is_premium") or not user.get("premium_until"):
+            return False
+        premium_until = user["premium_until"]
+        if premium_until.tzinfo is None:
+            premium_until = premium_until.replace(tzinfo=timezone.utc)
+        if premium_until <= datetime.now(timezone.utc):
+            return False
     if cost_xp > 0:
         current_xp = user.get("xp", 0)
         if current_xp < cost_xp:
@@ -263,8 +270,13 @@ def create_user(user_id: int, referrer_id: int = None):
         referrer = db.users.find_one({"user_id": referrer_id})
         if referrer:
             current_until = referrer.get("premium_until")
-            if current_until and current_until > datetime.now(timezone.utc):
-                new_until = current_until + timedelta(days=7)
+            if current_until:
+                if current_until.tzinfo is None:
+                    current_until = current_until.replace(tzinfo=timezone.utc)
+                if current_until > datetime.now(timezone.utc):
+                    new_until = current_until + timedelta(days=7)
+                else:
+                    new_until = datetime.now(timezone.utc) + timedelta(days=7)
             else:
                 new_until = datetime.now(timezone.utc) + timedelta(days=7)
             db.users.update_one({"user_id": referrer_id}, {"$set": {"is_premium": True, "premium_until": new_until}})
@@ -274,7 +286,11 @@ def is_premium(user_id: int) -> bool:
     if not user:
         return False
     if user.get("is_premium") and user.get("premium_until"):
-        if user["premium_until"] > datetime.now(timezone.utc):
+        premium_until = user["premium_until"]
+        # Если дата в базе наивная (без временной зоны), добавляем UTC
+        if premium_until.tzinfo is None:
+            premium_until = premium_until.replace(tzinfo=timezone.utc)
+        if premium_until > datetime.now(timezone.utc):
             return True
         else:
             db.users.update_one({"user_id": user_id}, {"$set": {"is_premium": False}})
