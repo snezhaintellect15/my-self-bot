@@ -590,11 +590,7 @@ async def vip_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"👑 **VIP‑запрос (премиум)**\n\n"
-                     f"От: @{username}\n"
-                     f"ID: `{user_id}`\n"
-                     f"Текст: {escape_markdown(vip_text, version=2)}",
-                parse_mode="Markdown"
+                text=f"👑 VIP-запрос (премиум)\n\nОт: @{username}\nID: {user_id}\nТекст: {vip_text}"
             )
             await update.message.reply_text(
                 "✅ Ваше сообщение отправлено разработчику с высоким приоритетом. "
@@ -663,18 +659,18 @@ async def difficulty_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not text:
             await query.edit_message_text("❌ Ошибка: текст обещания не найден. Попробуйте снова.")
             return
-        del context.user_data['pending_agreement_text']
-        add_agreement(user_id, text, difficulty=diff)
-        diff_names = {0: "Легко", 1: "Средне", 2: "Хардкор"}
-        safe_text = escape_markdown(text, version=2)
-        await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{safe_text}\"", parse_mode="Markdown")
-        new_achievements = check_achievements(user_id)
-        for key in new_achievements:
-            if key.startswith("streak_"):
-                continue
-            name, desc = ACHIEVEMENTS.get(key, (key, ""))
-            if name:
-                await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!", parse_mode="Markdown")
+        # Сохраняем текст и сложность в контексте
+        context.user_data['pending_agreement_text'] = text
+        context.user_data['pending_agreement_diff'] = diff
+        # Показываем список категорий
+        cats = get_categories(user_id)
+        keyboard = []
+        for cat in cats:
+            keyboard.append([InlineKeyboardButton(cat['name'], callback_data=f"addcat_{str(cat['_id'])}")])
+        keyboard.append([InlineKeyboardButton("Без категории", callback_data="addcat_none")])
+        keyboard.append([InlineKeyboardButton("◀️ Отмена", callback_data="cancel_add")])
+        await query.edit_message_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
 async def list_agreements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1429,6 +1425,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cat_back":
         await categories_menu(update, context)
+        return
+
+    elif data.startswith("addcat_"):
+        cat_id = data.split("_", 1)[1]
+        user_id = query.from_user.id
+        text = context.user_data.get('pending_agreement_text')
+        diff = context.user_data.get('pending_agreement_diff', 0)
+        if not text:
+            await query.edit_message_text("❌ Ошибка: текст обещания не найден. Попробуйте снова.")
+            return
+        del context.user_data['pending_agreement_text']
+        del context.user_data['pending_agreement_diff']
+        if cat_id == "none":
+            add_agreement(user_id, text, difficulty=diff)
+        else:
+            try:
+                oid = ObjectId(cat_id)
+                add_agreement(user_id, text, category_id=oid, difficulty=diff)
+            except:
+                add_agreement(user_id, text, difficulty=diff)
+        diff_names = {0: "Легко", 1: "Средне", 2: "Хардкор"}
+        safe_text = escape_markdown(text, version=2)
+        await query.edit_message_text(f"✅ Сохранено ({diff_names[diff]}): \"{safe_text}\"", parse_mode="Markdown")
+        new_achievements = check_achievements(user_id)
+        for key in new_achievements:
+            if key.startswith("streak_"):
+                continue
+            name, desc = ACHIEVEMENTS.get(key, (key, ""))
+            if name:
+                await query.message.reply_text(f"🎉 Поздравляем! Ты получил достижение **{name}**!", parse_mode="Markdown")
+        return
+
+    elif data == "cancel_add":
+        if 'pending_agreement_text' in context.user_data:
+            del context.user_data['pending_agreement_text']
+        if 'pending_agreement_diff' in context.user_data:
+            del context.user_data['pending_agreement_diff']
+        await query.edit_message_text("❌ Добавление обещания отменено.")
         return
 
     elif data == "changepet_start":
