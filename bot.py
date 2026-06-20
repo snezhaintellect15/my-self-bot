@@ -447,7 +447,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("🐾 Питомец"), KeyboardButton("🛒 Магазин")],
         [KeyboardButton("🛡 Заморозка"), KeyboardButton("🌍 Челленджи")],
         [KeyboardButton("🪙 Баланс"), KeyboardButton("🤖 Напомнить")],
-        [KeyboardButton("💬 Фидбек"), KeyboardButton("❌ Отмена")]
+        [KeyboardButton("💬 Фидбек"), KeyboardButton("❌ Отмена")],
+        [KeyboardButton("📢 Наш канал")]
     ]
     if is_premium(update.effective_user.id):
         keyboard.append([KeyboardButton("👑 VIP-помощь")])
@@ -496,6 +497,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👥 Пригласи друга: /invite\n\n"
         "🤖 Попробуй умное напоминание:\n"
         "/remindme Напомни завтра в 10 утра купить хлеб\n\n"
+        "📢 Подпишись на наш канал «Время действовать!»: https://t.me/PromiseAction\n\n"
         "💬 Если есть идеи или проблемы — напиши /feedback"
     )
     await update.message.reply_text(welcome_text)
@@ -574,7 +576,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/invite — Реферальная ссылка\n"
         "/feedback — Написать идею/проблему\n"
         "/premium — Премиум-доступ\n"
-        "/cancel — Отменить операцию\n"
+        "/cancel — Отменить операцию\n\n"
+        "📢 Наш канал: https://t.me/PromiseAction\n"
     )
     if is_premium(update.effective_user.id):
         help_text += "\n👑 **Премиум:**\n/viphelp — Приоритетная поддержка"
@@ -1692,6 +1695,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пример: `/feedback Хочу больше мотивации!`\n\n"
             "За полезные идеи дарим монеты! 🎁"
         )
+    elif text == "📢 Наш канал":
+        await update.message.reply_text(
+            "📢 Подпишись на наш канал «Время действовать!»\n\n"
+            "Там ты найдёшь советы по продуктивности, мотивацию, челленджи с призами и новости бота.\n\n"
+            "👉 https://t.me/PromiseAction"
+        )
+        return
     elif text == "👑 VIP-помощь":
         await update.message.reply_text(
             "👑 **VIP-поддержка (премиум)**\n\n"
